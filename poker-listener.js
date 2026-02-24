@@ -30,11 +30,17 @@ export function processStateEvent(view, context) {
   context.prevState = view;
   context.prevPhase = view.phase;
 
+  // Reset dedup tracker on phase change (new phase = new actionable state)
+  if (view.phase !== prevPhase) {
+    context.lastActionType = null;
+  }
+
   // ── Check whether the agent needs to act ──
 
-  // 1. YOUR_TURN — agent must decide an action
+  // 1. YOUR_TURN — agent must decide an action (always emit, never dedup)
   if (view.isYourTurn) {
     outputs.push({ type: 'YOUR_TURN', state: view });
+    context.lastActionType = 'YOUR_TURN';
     return outputs;
   }
 
@@ -46,15 +52,20 @@ export function processStateEvent(view, context) {
   if (handJustEnded) {
     if (view.yourChips === 0 && view.canRebuy) {
       outputs.push({ type: 'REBUY_AVAILABLE', state: view });
+      context.lastActionType = 'REBUY_AVAILABLE';
     } else {
       outputs.push({ type: 'HAND_RESULT', state: view });
+      context.lastActionType = 'HAND_RESULT';
     }
     return outputs;
   }
 
   // 3. WAITING_FOR_PLAYERS — alone at table, no hand can start
   if (view.phase === 'WAITING' && view.players && view.players.length < 2) {
-    outputs.push({ type: 'WAITING_FOR_PLAYERS', state: view });
+    if (context.lastActionType !== 'WAITING_FOR_PLAYERS') {
+      outputs.push({ type: 'WAITING_FOR_PLAYERS', state: view });
+      context.lastActionType = 'WAITING_FOR_PLAYERS';
+    }
     return outputs;
   }
 
@@ -91,7 +102,7 @@ async function main() {
     process.exit(1);
   }
 
-  const context = { prevState: null, prevPhase: null };
+  const context = { prevState: null, prevPhase: null, lastActionType: null };
   const es = new EventSourceClass(sseUrl);
 
   es.addEventListener('state', (event) => {
@@ -118,9 +129,9 @@ async function main() {
   });
 
   es.onerror = (err) => {
+    // Emit error but do NOT close/exit — let eventsource auto-reconnect.
+    // The consumer tracks consecutive errors and decides when to give up.
     emit({ type: 'CONNECTION_ERROR', error: `SSE connection error: ${err.message || 'unknown'}` });
-    es.close();
-    process.exit(1);
   };
 }
 

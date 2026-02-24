@@ -388,3 +388,73 @@ describe('processStateEvent — opponent action events', () => {
     assert.ok(yourTurn, 'should also have YOUR_TURN');
   });
 });
+
+// ─── 11. Dedup: WAITING_FOR_PLAYERS not re-emitted on repeated state ─
+
+describe('processStateEvent — WAITING_FOR_PLAYERS dedup', () => {
+  it('does NOT re-emit WAITING_FOR_PLAYERS on repeated WAITING state with 1 player', () => {
+    const ctx = makeContext();
+    const view = makeView({
+      phase: 'WAITING',
+      isYourTurn: false,
+      players: [
+        {
+          seat: 0,
+          name: 'Hero',
+          chips: 555,
+          bet: 0,
+          invested: 0,
+          status: 'active',
+          isDealer: true,
+          isCurrentActor: false,
+        },
+      ],
+    });
+
+    // First call: should emit WAITING_FOR_PLAYERS
+    const outputs1 = processStateEvent(view, ctx);
+    const waiting1 = findOutput(outputs1, 'WAITING_FOR_PLAYERS');
+    assert.ok(waiting1, 'first call should have WAITING_FOR_PLAYERS');
+
+    // Second call with same state: should NOT re-emit
+    const outputs2 = processStateEvent(view, ctx);
+    const waiting2 = findOutput(outputs2, 'WAITING_FOR_PLAYERS');
+    assert.equal(waiting2, undefined, 'second call should NOT have WAITING_FOR_PLAYERS');
+  });
+
+  it('re-emits WAITING_FOR_PLAYERS after phase changes and returns to WAITING', () => {
+    const ctx = makeContext();
+    const alonePlayer = [
+      {
+        seat: 0,
+        name: 'Hero',
+        chips: 555,
+        bet: 0,
+        invested: 0,
+        status: 'active',
+        isDealer: true,
+        isCurrentActor: false,
+      },
+    ];
+
+    // 1. WAITING alone → WAITING_FOR_PLAYERS emitted
+    const waitingView1 = makeView({ phase: 'WAITING', isYourTurn: false, players: alonePlayer });
+    processStateEvent(waitingView1, ctx);
+
+    // 2. Phase changes to PREFLOP (someone joined, new hand)
+    const preflopView = makeView({ phase: 'PREFLOP', handNumber: 2 });
+    processStateEvent(preflopView, ctx);
+
+    // 3. PREFLOP → WAITING triggers HAND_RESULT (hand ended), not WAITING_FOR_PLAYERS
+    const waitingView2 = makeView({ phase: 'WAITING', isYourTurn: false, handNumber: 2, players: alonePlayer });
+    const handEndOutputs = processStateEvent(waitingView2, ctx);
+    const handResult = findOutput(handEndOutputs, 'HAND_RESULT');
+    assert.ok(handResult, 'PREFLOP→WAITING should produce HAND_RESULT');
+
+    // 4. Subsequent WAITING update (same phase) → now WAITING_FOR_PLAYERS fires
+    const waitingView3 = makeView({ phase: 'WAITING', isYourTurn: false, handNumber: 2, players: alonePlayer });
+    const outputs = processStateEvent(waitingView3, ctx);
+    const waiting = findOutput(outputs, 'WAITING_FOR_PLAYERS');
+    assert.ok(waiting, 'should re-emit WAITING_FOR_PLAYERS after hand result cleared');
+  });
+});

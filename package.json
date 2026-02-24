@@ -1,0 +1,13 @@
+{
+  "name": "agent-poker-skill",
+  "version": "1.0.0",
+  "description": "OpenClaw skill for playing poker at Agent Poker tables",
+  "type": "module",
+  "main": "poker-listener.js",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "eventsource": "^3.0.0"
+  }
+}

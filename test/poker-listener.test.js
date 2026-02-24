@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { processStateEvent, processClosedEvent } from '../poker-listener.js';
+import { processStateEvent, processClosedEvent, buildSummary } from '../poker-listener.js';
 
 /**
  * Factory to build a PlayerView with sensible defaults.
@@ -106,7 +106,7 @@ describe('processStateEvent — EVENT outputs', () => {
 // ─── 2. Returns YOUR_TURN after EVENT outputs ────────────────────────
 
 describe('processStateEvent — YOUR_TURN', () => {
-  it('returns EVENT + YOUR_TURN when isYourTurn is true', () => {
+  it('returns EVENT + YOUR_TURN with summary when isYourTurn is true', () => {
     const ctx = makeContext();
     const view = makeView({
       isYourTurn: true,
@@ -122,6 +122,9 @@ describe('processStateEvent — YOUR_TURN', () => {
     const yourTurn = findOutput(outputs, 'YOUR_TURN');
     assert.ok(yourTurn, 'should have YOUR_TURN output');
     assert.equal(yourTurn.state, view);
+    assert.ok(typeof yourTurn.summary === 'string', 'should have summary string');
+    assert.ok(yourTurn.summary.includes('PREFLOP'), 'summary should include phase');
+    assert.ok(yourTurn.summary.includes('As Kh'), 'summary should include cards');
   });
 
   it('YOUR_TURN appears after EVENT outputs (ordering)', () => {
@@ -342,7 +345,64 @@ describe('processClosedEvent', () => {
   });
 });
 
-// ─── 10. Opponent actions produce EVENT outputs ──────────────────────
+// ─── 10. buildSummary formats decision context ───────────────────────
+
+describe('buildSummary', () => {
+  it('includes phase, cards, pot, stack, active count, and actions', () => {
+    const view = makeView({
+      phase: 'FLOP',
+      yourCards: ['Ah', 'Kd'],
+      pot: 50,
+      yourChips: 450,
+      boardCards: ['Qs', '9h', '3c'],
+      availableActions: [
+        { type: 'fold' },
+        { type: 'check' },
+        { type: 'bet', minAmount: 10, maxAmount: 450 },
+      ],
+    });
+
+    const summary = buildSummary(view);
+
+    assert.ok(summary.includes('FLOP'), 'should include phase');
+    assert.ok(summary.includes('Ah Kd'), 'should include cards');
+    assert.ok(summary.includes('Pot:50'), 'should include pot');
+    assert.ok(summary.includes('Stack:450'), 'should include stack');
+    assert.ok(summary.includes('2 active'), 'should include active count');
+    assert.ok(summary.includes('fold'), 'should include fold action');
+    assert.ok(summary.includes('check'), 'should include check action');
+    assert.ok(summary.includes('bet 10-450'), 'should include bet range');
+  });
+
+  it('shows call amount', () => {
+    const view = makeView({
+      availableActions: [
+        { type: 'fold' },
+        { type: 'call', amount: 20 },
+        { type: 'raise', minAmount: 40, maxAmount: 970 },
+      ],
+    });
+
+    const summary = buildSummary(view);
+
+    assert.ok(summary.includes('call 20'), 'should show call with amount');
+    assert.ok(summary.includes('raise 40-970'), 'should show raise range');
+  });
+
+  it('handles missing cards gracefully', () => {
+    const view = makeView({ yourCards: undefined });
+    const summary = buildSummary(view);
+    assert.ok(summary.includes('??'), 'should show ?? for missing cards');
+  });
+
+  it('handles empty available actions', () => {
+    const view = makeView({ availableActions: [] });
+    const summary = buildSummary(view);
+    assert.ok(summary.includes('Actions: '), 'should have empty actions');
+  });
+});
+
+// ─── 11. Opponent actions produce EVENT outputs ──────────────────────
 
 describe('processStateEvent — opponent action events', () => {
   it('produces EVENT for opponent raise between calls', () => {
@@ -389,7 +449,7 @@ describe('processStateEvent — opponent action events', () => {
   });
 });
 
-// ─── 11. Dedup: WAITING_FOR_PLAYERS not re-emitted on repeated state ─
+// ─── 12. Dedup: WAITING_FOR_PLAYERS not re-emitted on repeated state ─
 
 describe('processStateEvent — WAITING_FOR_PLAYERS dedup', () => {
   it('does NOT re-emit WAITING_FOR_PLAYERS on repeated WAITING state with 1 player', () => {

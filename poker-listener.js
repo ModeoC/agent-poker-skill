@@ -3,6 +3,24 @@ import { diffStates } from './state-differ.js';
 const ACTIVE_PHASES = new Set(['PREFLOP', 'FLOP', 'TURN', 'RIVER']);
 
 /**
+ * Build a one-line summary of the decision context for YOUR_TURN.
+ * Saves the LLM from parsing nested JSON during decision-making.
+ */
+export function buildSummary(view) {
+  const cards = view.yourCards?.join(' ') || '??';
+  const phase = view.phase;
+  const pot = view.pot;
+  const stack = view.yourChips;
+  const active = view.players?.filter(p => p.status === 'active').length || 0;
+  const actions = (view.availableActions || []).map(a => {
+    if (a.type === 'fold' || a.type === 'check' || a.type === 'call') return a.amount ? `${a.type} ${a.amount}` : a.type;
+    if (a.minAmount != null) return `${a.type} ${a.minAmount}-${a.maxAmount}`;
+    return a.type;
+  }).join(', ');
+  return `${phase} | ${cards} | Pot:${pot} | Stack:${stack} | ${active} active | Actions: ${actions}`;
+}
+
+/**
  * Process a state SSE event (PlayerView).
  *
  * Diffs the incoming view against context.prevState, returns an array of
@@ -39,7 +57,7 @@ export function processStateEvent(view, context) {
 
   // 1. YOUR_TURN — agent must decide an action (always emit, never dedup)
   if (view.isYourTurn) {
-    outputs.push({ type: 'YOUR_TURN', state: view });
+    outputs.push({ type: 'YOUR_TURN', state: view, summary: buildSummary(view) });
     context.lastActionType = 'YOUR_TURN';
     return outputs;
   }

@@ -122,50 +122,41 @@ The script runs continuously and outputs JSON lines. Poll its output periodicall
 
 ### Polling Loop
 
-Enter a loop that polls the listener output every ~5 seconds:
+Enter a loop that polls the listener output every ~2 seconds:
 
 1. **Poll** the background process for new output lines.
 2. **Process** each JSON line based on its `type` field (see below).
 3. **Check** for user messages and respond if any.
-4. **Wait** ~5 seconds if no events, then loop back to step 1.
+4. **Wait** ~2 seconds if no events, then loop back to step 1.
 
 ### Event Types
 
 #### EVENT
 
-A game event to relay to the user. Print the `message` field exactly as-is. Do not add commentary.
+A game event to relay to the user. For each EVENT line, use the **message tool** to send it as a **separate message** to the user. Do NOT include EVENT content in your text reply — this ensures each event appears as its own bubble in Telegram.
 
 ```json
 {"type":"EVENT","message":"Hand #3 — Your cards: A♠ K♥"}
 ```
 
-Output to user: `Hand #3 — Your cards: A♠ K♥`
+Send via message tool: `Hand #3 — Your cards: A♠ K♥`
 
 #### YOUR_TURN
 
 You need to make a betting decision.
 
 ```json
-{"type":"YOUR_TURN","state":{...}}
+{"type":"YOUR_TURN","state":{...},"summary":"PREFLOP | As Kh | Pot:30 | Stack:970 | 2 active | Actions: call 20, raise 40-970"}
 ```
 
 **Steps:**
 
-1. Look at `state` to make your decision. Key fields:
-   - `state.yourCards` — your hole cards
-   - `state.boardCards` — community cards
-   - `state.yourChips` — your current stack
-   - `state.pot` — total pot size
-   - `state.phase` — current phase: `PREFLOP`, `FLOP`, `TURN`, or `RIVER`
-   - `state.availableActions` — legal moves
-   - `state.players` — all players with chips, bets, and status
+1. Read the `summary` field for a quick overview of the situation: phase, your cards, pot, stack, active players, and legal actions.
 
-2. Look at `state.availableActions` for legal moves:
-   - `{"type":"fold"}` — give up the hand
-   - `{"type":"check"}` — pass (no bet to match)
-   - `{"type":"call","amount":10}` — match the current bet
-   - `{"type":"bet","minAmount":4,"maxAmount":200}` — open betting
-   - `{"type":"raise","minAmount":12,"maxAmount":200}` — raise
+2. Only look at `state` if you need extra detail (board cards, specific player bets/stacks). Key fields:
+   - `state.boardCards` — community cards
+   - `state.players` — all players with chips, bets, and status
+   - `state.dealerSeat` — for position awareness
 
 3. Decide your action using the Decision Making guidelines below.
 
@@ -180,7 +171,7 @@ curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
 
 For `fold`, `check`, `call`, and `all_in`, omit the `amount` field. For `bet` and `raise`, include the amount (must be between minAmount and maxAmount).
 
-5. Tell the user what you did and why in **1 sentence**. Examples:
+5. Tell the user what you did and why in **1 sentence** (this is your text reply). Examples:
    - "Raising to 24 — top pair, good kicker."
    - "Folding. 7-2 offsuit from early position."
    - "Calling — open-ended straight draw with pot odds."
@@ -198,7 +189,7 @@ A hand just finished and you still have chips.
 **Steps:**
 
 1. Check `state.lastHandResult` for winners and pot distribution.
-2. Summarize in **1 sentence**: who won, how much, your stack. Example: "Lost 20 to Alice's flush. Stack: 480."
+2. Use the **message tool** to send a **1-sentence summary**: who won, how much, your stack. Example: "Lost 20 to Alice's flush. Stack: 480." Do not include it in your text reply.
 3. Continue the polling loop.
 
 #### REBUY_AVAILABLE
@@ -268,94 +259,66 @@ The listener process exited with a connection error.
 
 ## Decision Making
 
-When it is your turn, evaluate the situation and pick an action. Use this reasoning framework:
+Decide fast. Read the `summary` field, match to a rule below, act. Do not deliberate beyond what is listed here.
 
-### 1. Hand Strength
+### Quick-Fold List (preflop)
 
-Assess your hole cards and the board:
+Fold immediately if your cards are NOT in the playable list below. This saves time on ~40% of hands.
 
-- **Premium hands** (AA, KK, QQ, AKs): Raise or re-raise aggressively.
-- **Strong hands** (JJ, TT, AK, AQs): Raise for value, call raises.
-- **Medium hands** (99-77, suited connectors, KQs): Play in position, fold to heavy action.
-- **Weak hands** (low unsuited, disconnected): Fold to raises, check when free.
+### Preflop Chart
 
-After the flop, evaluate your made hand (pair, two pair, trips, straight, flush, full house) and draws (flush draw = ~35% by river, open-ended straight draw = ~32%).
+| Hand | Any Position | Late Position (near dealer) |
+|------|-------------|---------------------------|
+| AA, KK, QQ | Raise 3x BB | Raise 3x BB |
+| JJ, TT, AKs, AKo | Raise 2.5x BB | Raise 2.5x BB |
+| AQs, AJs, KQs, 99, 88 | Raise 2.5x BB | Raise 2.5x BB |
+| 77-22, ATs-A2s, KJs, QJs, JTs, T9s, 98s, 87s, 76s | Fold | Raise or call |
+| Everything else | Fold | Fold |
 
-### 2. Pot Odds
+If facing a raise: call with JJ+/AK, 3-bet with QQ+/AK, fold the rest (unless pot odds > 4:1 with a pocket pair for set mining).
 
-Calculate whether a call is profitable:
+### Postflop Rules
 
-- Pot odds = amount to call / (pot + amount to call)
-- If your estimated chance of winning exceeds the pot odds, calling is profitable.
-- Example: pot is 20, call is 10 -> pot odds = 10/30 = 33%. Need >33% equity to call.
+- **Strong hand** (top pair good kicker, two pair+): Bet 50-66% pot for value.
+- **Draw** (flush draw, open-ended straight): Call if pot odds > 4:1 (flush) or 5:1 (OESD). Otherwise fold.
+- **Nothing**: Check if free, fold to a bet. Bluff only if heads-up and you were the preflop raiser (c-bet 33% pot, once).
+- **Monster** (set+): Bet or raise for value. Do not slow-play.
 
-### 3. Position
+### Bet Sizing
 
-Your seat relative to the dealer matters:
+- **Value**: 50-66% of pot.
+- **Bluff/C-bet**: 33% of pot.
+- **Under 10 BB stack**: Shove or fold, no small bets.
 
-- `state.dealerSeat` tells you where the button is.
-- Acting last (close to dealer) is an advantage — you see what others do first.
-- Play tighter (fewer hands) from early position, looser from late position.
-
-### 4. Stack-to-Pot Ratio (SPR)
-
-- SPR = your stack / pot size
-- Low SPR (<3): Commit with top pair or better. Fold or shove.
-- Medium SPR (3-10): Standard play. Bet for value, fold marginal hands to aggression.
-- High SPR (>10): Be cautious with one-pair hands. Look for big hands or draws.
-
-### 5. Opponent Actions
-
-Read the table from `state.players`:
-
-- Who has folded? Fewer opponents = your hand is relatively stronger.
-- Who bet or raised? Large bets usually mean strong hands.
-- Who is short-stacked? They may shove with wider ranges.
-- Check `status` field: `active`, `folded`, `all_in`.
-
-### 6. Bet Sizing Guidelines
-
-When you decide to bet or raise, choose an appropriate size:
-
-- **Value bets** (strong hand, want a call): 50-75% of the pot.
-- **Bluffs** (weak hand, want a fold): 33-50% of the pot.
-- **3-bets** (re-raise preflop): About 3x the open raise.
-- **Continuation bets** (you raised preflop, betting the flop): 33-50% of the pot.
-- **All-in**: When your stack is less than a pot-sized bet, or you have a very strong hand and want maximum value.
-
-Always respect `minAmount` and `maxAmount` from `availableActions`. If your desired size is outside the range, use the closest legal amount.
-
-### 7. General Strategy
-
-- Do not bluff too often. Against multiple opponents, bluff rarely.
-- If the action is check to you and you have nothing, check back more than you bet.
-- With a very strong hand, vary between betting and checking to avoid being predictable.
-- When short-stacked (under 10 big blinds), look for spots to go all-in rather than making small bets.
+Always respect `minAmount` and `maxAmount` from `availableActions`.
 
 ## Narration
 
-Keep messages short. The listener outputs pre-formatted event strings — relay them exactly.
+Keep messages short. Use the right delivery method for each event type to ensure separate Telegram bubbles.
 
 ### Game Events (EVENT type)
 
-Print the `message` field verbatim. Do not add commentary. Examples:
+Send each EVENT via the **message tool** as a separate message. Do not add commentary. Do not include in your text reply.
 
+Examples (each sent as a separate message):
 - `Hand #5 — Your cards: J♠ T♠`
 - `Flop: Q♥ 9♠ 3♦ | Pot: 12`
 - `Player2 raised to 20`
 
 ### Your Decisions (YOUR_TURN type)
 
-After submitting an action, explain in **1 sentence**. Examples:
+After submitting an action, your **text reply** is 1 sentence explaining your decision. This is the only content in your text reply.
 
+Examples:
 - "Raising to 12 — ace-king suited in position."
 - "Folding. 7-2 offsuit, not worth it."
 - "Calling — straight draw with pot odds."
 
 ### Hand Summaries (HAND_RESULT type)
 
-Summarize in **1 sentence**. Examples:
+Send via the **message tool** as a separate message. Do not include in your text reply.
 
+Examples:
 - "Player2 took it down with queens. Stack: 188."
 - "Won 45 with trip jacks. Stack: 245."
 
@@ -364,6 +327,17 @@ Summarize in **1 sentence**. Examples:
 Only when the user asks or every ~10 hands:
 
 - "After 8 hands, up 35. Stack: 235."
+
+### Summary
+
+| Output Type | Delivery Method | Content |
+|-------------|----------------|---------|
+| EVENT | message tool | Verbatim `message` field |
+| YOUR_TURN | text reply | 1-sentence decision |
+| HAND_RESULT | message tool | 1-sentence summary |
+| REBUY_AVAILABLE | text reply | Rebuy notification |
+| WAITING_FOR_PLAYERS | text reply | Wait or leave prompt |
+| TABLE_CLOSED | text reply | Session summary |
 
 ## Handling Player Messages
 

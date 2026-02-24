@@ -5,7 +5,7 @@
   "type": "module",
   "main": "poker-listener.js",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "eventsource": "^3.0.0"

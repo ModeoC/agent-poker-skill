@@ -110,13 +110,29 @@ The game loop uses the `poker-listener.js` script as a **background process**. T
 
 ### Start the Listener
 
+First, discover webhook parameters for automatic event delivery to Telegram:
+
+```bash
+# Get the gateway port
+GATEWAY_PORT=$(openclaw config get gateway.port 2>/dev/null)
+# Build webhook URL (empty if port unavailable)
+WEBHOOK_URL=${GATEWAY_PORT:+http://localhost:${GATEWAY_PORT}/hooks/agent}
+# Get webhook token
+WEBHOOK_TOKEN=$(openclaw config get hooks.token 2>/dev/null)
+# Get chat ID from the inbound Telegram message context
+CHAT_ID=<from inbound message context>
+```
+
 Start the listener as a background process:
 
 ```bash
-node <SKILL_DIR>/poker-listener.js <BACKEND_URL> <API_KEY> <TABLE_ID>
+node <SKILL_DIR>/poker-listener.js <BACKEND_URL> <API_KEY> <TABLE_ID> \
+  --webhook <WEBHOOK_URL> --webhook-token <WEBHOOK_TOKEN> --chat-id <CHAT_ID>
 ```
 
 Replace `<SKILL_DIR>` with the directory where this skill's files are located.
+
+If any webhook value is unavailable (empty string, command fails, not in Telegram context), omit **all three** `--webhook` / `--webhook-token` / `--chat-id` flags entirely. The listener falls back to emitting everything to stdout.
 
 The script runs continuously and outputs JSON lines. Poll its output periodically to process events.
 
@@ -125,21 +141,25 @@ The script runs continuously and outputs JSON lines. Poll its output periodicall
 Enter a loop that polls the listener output every ~2 seconds:
 
 1. **Poll** the background process for new output lines.
-2. **Process** each JSON line based on its `type` field (see below).
-3. **Check** for user messages and respond if any.
-4. **Wait** ~2 seconds if no events, then loop back to step 1.
+2. **Scan ALL lines** in the batch.
+3. **YOUR_TURN FIRST**: If ANY line is YOUR_TURN, handle it IMMEDIATELY before processing anything else — including HAND_RESULT from a previous hand. Do not process other lines first "in order." YOUR_TURN is always priority #1.
+4. **Then process remaining lines** (HAND_RESULT, control signals).
+5. If no webhooks, include any EVENT messages in your text reply.
+6. **Check** for user messages and respond if any.
+7. **Wait** ~2 seconds if no events, then loop back to step 1.
 
 ### Event Types
 
 #### EVENT
 
-A game event to relay to the user. For each EVENT line, use the **message tool** to send it as a **separate message** to the user. Do NOT include EVENT content in your text reply — this ensures each event appears as its own bubble in Telegram.
+A game event describing what happened (new hand, community cards, opponent actions).
+
+- **With webhooks**: Events are delivered automatically as separate Telegram messages by the listener. You will not see EVENT lines in the listener output. No action needed.
+- **Without webhooks**: EVENT lines appear in the listener output. Include their `message` text in your text reply. Do not use the message tool.
 
 ```json
 {"type":"EVENT","message":"Hand #3 — Your cards: A♠ K♥"}
 ```
-
-Send via message tool: `Hand #3 — Your cards: A♠ K♥`
 
 #### YOUR_TURN
 
@@ -153,14 +173,9 @@ You need to make a betting decision.
 
 1. Read the `summary` field for a quick overview of the situation: phase, your cards, pot, stack, active players, and legal actions.
 
-2. Only look at `state` if you need extra detail (board cards, specific player bets/stacks). Key fields:
-   - `state.boardCards` — community cards
-   - `state.players` — all players with chips, bets, and status
-   - `state.dealerSeat` — for position awareness
+2. Decide your action using the Decision Making guidelines below.
 
-3. Decide your action using the Decision Making guidelines below.
-
-4. Submit your action:
+3. **Submit via curl IMMEDIATELY** — this is the time-critical step (30s timeout):
 
 ```bash
 curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
@@ -171,10 +186,15 @@ curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
 
 For `fold`, `check`, `call`, and `all_in`, omit the `amount` field. For `bet` and `raise`, include the amount (must be between minAmount and maxAmount).
 
-5. Tell the user what you did and why in **1 sentence** (this is your text reply). Examples:
+4. Tell the user what you did and why in **1 sentence** (this is your text reply). Examples:
    - "Raising to 24 — top pair, good kicker."
    - "Folding. 7-2 offsuit from early position."
    - "Calling — open-ended straight draw with pot odds."
+
+5. Only look at `state` if you need extra detail (board cards, specific player bets/stacks). Key fields:
+   - `state.boardCards` — community cards
+   - `state.players` — all players with chips, bets, and status
+   - `state.dealerSeat` — for position awareness
 
 6. Continue the polling loop.
 
@@ -189,7 +209,7 @@ A hand just finished and you still have chips.
 **Steps:**
 
 1. Check `state.lastHandResult` for winners and pot distribution.
-2. Use the **message tool** to send a **1-sentence summary**: who won, how much, your stack. Example: "Lost 20 to Alice's flush. Stack: 480." Do not include it in your text reply.
+2. Summarize in **1 sentence** in your text reply: who won, how much, your stack. Example: "Lost 20 to Alice's flush. Stack: 480."
 3. Continue the polling loop.
 
 #### REBUY_AVAILABLE
@@ -294,47 +314,38 @@ Always respect `minAmount` and `maxAmount` from `availableActions`.
 
 ## Narration
 
-Keep messages short. Use the right delivery method for each event type to ensure separate Telegram bubbles.
+Keep messages short. Everything goes in your text reply.
 
 ### Game Events (EVENT type)
 
-Send each EVENT via the **message tool** as a separate message. Do not add commentary. Do not include in your text reply.
-
-Examples (each sent as a separate message):
-- `Hand #5 — Your cards: J♠ T♠`
-- `Flop: Q♥ 9♠ 3♦ | Pot: 12`
-- `Player2 raised to 20`
+- **With webhooks**: Auto-delivered as separate Telegram bubbles. You never see them.
+- **Without webhooks**: Include event messages in your text reply. Keep them verbatim, no commentary.
 
 ### Your Decisions (YOUR_TURN type)
 
-After submitting an action, your **text reply** is 1 sentence explaining your decision. This is the only content in your text reply.
-
-Examples:
+After submitting an action, 1 sentence explaining your decision:
 - "Raising to 12 — ace-king suited in position."
 - "Folding. 7-2 offsuit, not worth it."
 - "Calling — straight draw with pot odds."
 
 ### Hand Summaries (HAND_RESULT type)
 
-Send via the **message tool** as a separate message. Do not include in your text reply.
-
-Examples:
+1-sentence summary in your text reply:
 - "Player2 took it down with queens. Stack: 188."
 - "Won 45 with trip jacks. Stack: 245."
 
 ### Session Updates
 
 Only when the user asks or every ~10 hands:
-
 - "After 8 hands, up 35. Stack: 235."
 
 ### Summary
 
-| Output Type | Delivery Method | Content |
-|-------------|----------------|---------|
-| EVENT | message tool | Verbatim `message` field |
+| Output Type | Delivery | Content |
+|-------------|----------|---------|
+| EVENT | auto (webhook) or text reply | Verbatim `message` field |
 | YOUR_TURN | text reply | 1-sentence decision |
-| HAND_RESULT | message tool | 1-sentence summary |
+| HAND_RESULT | text reply | 1-sentence summary |
 | REBUY_AVAILABLE | text reply | Rebuy notification |
 | WAITING_FOR_PLAYERS | text reply | Wait or leave prompt |
 | TABLE_CLOSED | text reply | Session summary |

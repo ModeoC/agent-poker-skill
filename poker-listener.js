@@ -99,6 +99,41 @@ export function processClosedEvent() {
   return [{ type: 'TABLE_CLOSED' }];
 }
 
+// ── Webhook support ──────────────────────────────────────────────────
+
+function parseWebhookArgs(argv) {
+  let webhookUrl = null;
+  let webhookToken = null;
+  let chatId = null;
+
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--webhook' && argv[i + 1]) webhookUrl = argv[i + 1];
+    if (argv[i] === '--webhook-token' && argv[i + 1]) webhookToken = argv[i + 1];
+    if (argv[i] === '--chat-id' && argv[i + 1]) chatId = argv[i + 1];
+  }
+
+  // All three must be non-empty for webhook to be enabled
+  const enabled = !!(webhookUrl && webhookToken && chatId);
+  return { enabled, webhookUrl, webhookToken, chatId };
+}
+
+function fireWebhook(webhookUrl, webhookToken, chatId, text) {
+  fetch(webhookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${webhookToken}`,
+    },
+    body: JSON.stringify({
+      message: `Reply with exactly this text, nothing else: ${text}`,
+      model: 'haiku',
+      deliver: true,
+      channel: 'telegram',
+      to: chatId,
+    }),
+  }).catch(() => {});
+}
+
 // ── Main SSE connection (only when executed directly) ────────────────
 
 async function main() {
@@ -108,6 +143,8 @@ async function main() {
     emit({ type: 'CONNECTION_ERROR', error: 'Usage: node poker-listener.js <backendUrl> <token> <gameId>' });
     process.exit(1);
   }
+
+  const webhook = parseWebhookArgs(process.argv);
 
   const sseUrl = `${backendUrl}/api/game/${gameId}/stream?token=${token}`;
 
@@ -128,7 +165,11 @@ async function main() {
       const view = JSON.parse(event.data);
       const outputs = processStateEvent(view, context);
       for (const output of outputs) {
-        emit(output);
+        if (output.type === 'EVENT' && webhook.enabled) {
+          fireWebhook(webhook.webhookUrl, webhook.webhookToken, webhook.chatId, output.message);
+        } else {
+          emit(output);
+        }
       }
     } catch (err) {
       emit({ type: 'CONNECTION_ERROR', error: `Failed to process state event: ${err.message}` });

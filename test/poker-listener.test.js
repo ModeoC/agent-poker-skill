@@ -63,81 +63,82 @@ function makeContext(overrides = {}) {
   return {
     prevState: null,
     prevPhase: null,
-    eventBuffer: [],
     ...overrides,
   };
 }
 
-// ─── 1. Buffers events and returns null when not your turn ──────────
+/** Find an output of a given type in the outputs array. */
+function findOutput(outputs, type) {
+  return outputs.find((o) => o.type === type);
+}
 
-describe('processStateEvent — buffering', () => {
-  it('buffers events and returns null when not your turn', () => {
+/** Get all EVENT messages from outputs. */
+function eventMessages(outputs) {
+  return outputs.filter((o) => o.type === 'EVENT').map((o) => o.message);
+}
+
+// ─── 1. Returns EVENT outputs for state diffs ────────────────────────
+
+describe('processStateEvent — EVENT outputs', () => {
+  it('returns EVENT output for new hand diff', () => {
     const ctx = makeContext();
     const view = makeView({ isYourTurn: false });
 
-    const result = processStateEvent(view, ctx);
+    const outputs = processStateEvent(view, ctx);
 
-    assert.equal(result, null);
-    // Events from diffStates should be in the buffer (new hand event)
-    assert.ok(ctx.eventBuffer.length > 0);
+    const events = eventMessages(outputs);
+    assert.ok(events.length > 0, 'should have at least one EVENT');
+    assert.ok(events[0].includes('Hand #1'), 'first event should be hand start');
     // prevState should be updated
     assert.equal(ctx.prevState, view);
   });
-});
 
-// ─── 2. Returns YOUR_TURN when isYourTurn is true ───────────────────
+  it('returns empty array when nothing changed', () => {
+    const view = makeView();
+    const ctx = makeContext({ prevState: view, prevPhase: 'PREFLOP' });
 
-describe('processStateEvent — YOUR_TURN', () => {
-  it('returns YOUR_TURN with events and state when isYourTurn is true', () => {
-    const ctx = makeContext();
+    const outputs = processStateEvent(view, ctx);
 
-    // First call: buffer some events (not our turn yet)
-    const view1 = makeView({ isYourTurn: false });
-    processStateEvent(view1, ctx);
-
-    // Second call: now it is our turn
-    const view2 = makeView({
-      isYourTurn: true,
-      phase: 'PREFLOP',
-      availableActions: [{ type: 'CALL', amount: 20 }],
-      players: [
-        {
-          seat: 0,
-          name: 'Hero',
-          chips: 970,
-          bet: 10,
-          invested: 10,
-          status: 'active',
-          isDealer: true,
-          isCurrentActor: true,
-        },
-        {
-          seat: 1,
-          name: 'Alice',
-          chips: 940,
-          bet: 60,
-          invested: 60,
-          status: 'active',
-          isDealer: false,
-          isCurrentActor: false,
-        },
-      ],
-    });
-    const result = processStateEvent(view2, ctx);
-
-    assert.notEqual(result, null);
-    assert.equal(result.type, 'YOUR_TURN');
-    assert.ok(Array.isArray(result.events));
-    assert.ok(result.events.length > 0);
-    assert.equal(result.state, view2);
+    assert.equal(outputs.length, 0);
   });
 });
 
-// ─── 3. Returns HAND_RESULT for active -> SHOWDOWN ──────────────────
+// ─── 2. Returns YOUR_TURN after EVENT outputs ────────────────────────
+
+describe('processStateEvent — YOUR_TURN', () => {
+  it('returns EVENT + YOUR_TURN when isYourTurn is true', () => {
+    const ctx = makeContext();
+    const view = makeView({
+      isYourTurn: true,
+      availableActions: [{ type: 'CALL', amount: 20 }],
+    });
+
+    const outputs = processStateEvent(view, ctx);
+
+    // Should have EVENT(s) from the new hand diff, then YOUR_TURN
+    const events = eventMessages(outputs);
+    assert.ok(events.length > 0, 'should have EVENT outputs');
+
+    const yourTurn = findOutput(outputs, 'YOUR_TURN');
+    assert.ok(yourTurn, 'should have YOUR_TURN output');
+    assert.equal(yourTurn.state, view);
+  });
+
+  it('YOUR_TURN appears after EVENT outputs (ordering)', () => {
+    const ctx = makeContext();
+    const view = makeView({ isYourTurn: true });
+
+    const outputs = processStateEvent(view, ctx);
+
+    const lastOutput = outputs[outputs.length - 1];
+    assert.equal(lastOutput.type, 'YOUR_TURN');
+  });
+});
+
+// ─── 3. Returns HAND_RESULT for active -> SHOWDOWN ───────────────────
 
 describe('processStateEvent — HAND_RESULT (SHOWDOWN)', () => {
   it('returns HAND_RESULT when phase transitions from active to SHOWDOWN', () => {
-    // Set up context with a previous active phase
     const prevView = makeView({ phase: 'RIVER' });
     const ctx = makeContext({ prevState: prevView, prevPhase: 'RIVER' });
 
@@ -147,16 +148,15 @@ describe('processStateEvent — HAND_RESULT (SHOWDOWN)', () => {
       boardCards: ['As', '7c', '2d', 'Kh', '3s'],
     });
 
-    const result = processStateEvent(nextView, ctx);
+    const outputs = processStateEvent(nextView, ctx);
 
-    assert.notEqual(result, null);
-    assert.equal(result.type, 'HAND_RESULT');
-    assert.ok(Array.isArray(result.events));
-    assert.equal(result.state, nextView);
+    const handResult = findOutput(outputs, 'HAND_RESULT');
+    assert.ok(handResult, 'should have HAND_RESULT output');
+    assert.equal(handResult.state, nextView);
   });
 });
 
-// ─── 4. Returns HAND_RESULT for active -> WAITING ───────────────────
+// ─── 4. Returns HAND_RESULT for active -> WAITING ────────────────────
 
 describe('processStateEvent — HAND_RESULT (WAITING)', () => {
   it('returns HAND_RESULT when phase transitions from active to WAITING', () => {
@@ -169,14 +169,14 @@ describe('processStateEvent — HAND_RESULT (WAITING)', () => {
       boardCards: ['As', '7c', '2d'],
     });
 
-    const result = processStateEvent(nextView, ctx);
+    const outputs = processStateEvent(nextView, ctx);
 
-    assert.notEqual(result, null);
-    assert.equal(result.type, 'HAND_RESULT');
+    const handResult = findOutput(outputs, 'HAND_RESULT');
+    assert.ok(handResult, 'should have HAND_RESULT output');
   });
 });
 
-// ─── 5. Does NOT return HAND_RESULT for WAITING -> WAITING ──────────
+// ─── 5. Does NOT return HAND_RESULT for WAITING -> WAITING ───────────
 
 describe('processStateEvent — no false HAND_RESULT', () => {
   it('does NOT return HAND_RESULT when phase is WAITING and was already WAITING', () => {
@@ -188,13 +188,14 @@ describe('processStateEvent — no false HAND_RESULT', () => {
       isYourTurn: false,
     });
 
-    const result = processStateEvent(nextView, ctx);
+    const outputs = processStateEvent(nextView, ctx);
 
-    assert.equal(result, null);
+    const handResult = findOutput(outputs, 'HAND_RESULT');
+    assert.equal(handResult, undefined, 'should NOT have HAND_RESULT');
   });
 });
 
-// ─── 6. Returns REBUY_AVAILABLE ─────────────────────────────────────
+// ─── 6. Returns REBUY_AVAILABLE ──────────────────────────────────────
 
 describe('processStateEvent — REBUY_AVAILABLE', () => {
   it('returns REBUY_AVAILABLE when hand ended and yourChips === 0 and canRebuy', () => {
@@ -208,27 +209,26 @@ describe('processStateEvent — REBUY_AVAILABLE', () => {
       canRebuy: true,
     });
 
-    const result = processStateEvent(nextView, ctx);
+    const outputs = processStateEvent(nextView, ctx);
 
-    assert.notEqual(result, null);
-    assert.equal(result.type, 'REBUY_AVAILABLE');
-    assert.ok(Array.isArray(result.events));
-    assert.equal(result.state, nextView);
+    const rebuy = findOutput(outputs, 'REBUY_AVAILABLE');
+    assert.ok(rebuy, 'should have REBUY_AVAILABLE output');
+    assert.equal(rebuy.state, nextView);
   });
 });
 
-// ─── 7. Flushes event buffer on return ──────────────────────────────
+// ─── 7. Each state update produces independent outputs ───────────────
 
-describe('processStateEvent — buffer flushing', () => {
-  it('flushes event buffer on return, subsequent call starts empty', () => {
+describe('processStateEvent — independent outputs per call', () => {
+  it('each call returns its own outputs, no accumulation across calls', () => {
     const ctx = makeContext();
 
-    // First call buffers events (new hand)
+    // First call: new hand diff
     const view1 = makeView({ isYourTurn: false });
-    processStateEvent(view1, ctx);
-    assert.ok(ctx.eventBuffer.length > 0, 'buffer should have events after first call');
+    const outputs1 = processStateEvent(view1, ctx);
+    assert.ok(outputs1.length > 0, 'first call should have outputs');
 
-    // Second call triggers YOUR_TURN — buffer should be returned and flushed
+    // Second call: YOUR_TURN with opponent action diff
     const view2 = makeView({
       isYourTurn: true,
       players: [
@@ -254,26 +254,18 @@ describe('processStateEvent — buffer flushing', () => {
         },
       ],
     });
-    const result = processStateEvent(view2, ctx);
-    assert.notEqual(result, null);
-    assert.ok(result.events.length > 0, 'result should include buffered events');
+    const outputs2 = processStateEvent(view2, ctx);
 
-    // Buffer should now be empty
-    assert.equal(ctx.eventBuffer.length, 0, 'buffer should be empty after flush');
-
-    // Third call: buffer starts fresh
-    const view3 = makeView({ isYourTurn: false, handNumber: 2, yourCards: ['Tc', '9d'] });
-    processStateEvent(view3, ctx);
-    // Events should only be from view3, not from previous calls
-    assert.ok(ctx.eventBuffer.length > 0, 'new events should be buffered');
+    // outputs2 should NOT contain the hand-start event from outputs1
+    const events2 = eventMessages(outputs2);
     assert.ok(
-      ctx.eventBuffer.every((e) => !e.includes('A♠ K♥')),
-      'buffer should not contain events from previous hand',
+      events2.every((e) => !e.includes('Hand #1')),
+      'second call should not repeat first call events',
     );
   });
 });
 
-// ─── 8. Returns WAITING_FOR_PLAYERS when alone at table ─────────────
+// ─── 8. Returns WAITING_FOR_PLAYERS when alone at table ──────────────
 
 describe('processStateEvent — WAITING_FOR_PLAYERS', () => {
   it('returns WAITING_FOR_PLAYERS when phase is WAITING and only 1 player', () => {
@@ -295,15 +287,14 @@ describe('processStateEvent — WAITING_FOR_PLAYERS', () => {
       ],
     });
 
-    const result = processStateEvent(view, ctx);
+    const outputs = processStateEvent(view, ctx);
 
-    assert.notEqual(result, null);
-    assert.equal(result.type, 'WAITING_FOR_PLAYERS');
-    assert.ok(Array.isArray(result.events));
-    assert.equal(result.state, view);
+    const waiting = findOutput(outputs, 'WAITING_FOR_PLAYERS');
+    assert.ok(waiting, 'should have WAITING_FOR_PLAYERS output');
+    assert.equal(waiting.state, view);
   });
 
-  it('does NOT return WAITING_FOR_PLAYERS when WAITING with 2 players (one busted)', () => {
+  it('does NOT return WAITING_FOR_PLAYERS when WAITING with 2 players', () => {
     const ctx = makeContext();
     const view = makeView({
       phase: 'WAITING',
@@ -333,18 +324,67 @@ describe('processStateEvent — WAITING_FOR_PLAYERS', () => {
       ],
     });
 
-    const result = processStateEvent(view, ctx);
+    const outputs = processStateEvent(view, ctx);
 
-    // Should return null (buffering) — opponent can still rebuy
-    assert.equal(result, null);
+    const waiting = findOutput(outputs, 'WAITING_FOR_PLAYERS');
+    assert.equal(waiting, undefined, 'should NOT have WAITING_FOR_PLAYERS');
   });
 });
 
-// ─── 9. processClosedEvent returns TABLE_CLOSED ─────────────────────
+// ─── 9. processClosedEvent returns TABLE_CLOSED array ────────────────
 
 describe('processClosedEvent', () => {
-  it('returns TABLE_CLOSED', () => {
-    const result = processClosedEvent();
-    assert.deepStrictEqual(result, { type: 'TABLE_CLOSED' });
+  it('returns array with TABLE_CLOSED', () => {
+    const outputs = processClosedEvent();
+    assert.ok(Array.isArray(outputs));
+    assert.equal(outputs.length, 1);
+    assert.deepStrictEqual(outputs[0], { type: 'TABLE_CLOSED' });
+  });
+});
+
+// ─── 10. Opponent actions produce EVENT outputs ──────────────────────
+
+describe('processStateEvent — opponent action events', () => {
+  it('produces EVENT for opponent raise between calls', () => {
+    const view1 = makeView({ isYourTurn: false });
+    const ctx = makeContext();
+    processStateEvent(view1, ctx);
+
+    // Opponent raised
+    const view2 = makeView({
+      isYourTurn: true,
+      players: [
+        {
+          seat: 0,
+          name: 'Hero',
+          chips: 970,
+          bet: 10,
+          invested: 10,
+          status: 'active',
+          isDealer: true,
+          isCurrentActor: true,
+        },
+        {
+          seat: 1,
+          name: 'Alice',
+          chips: 940,
+          bet: 60,
+          invested: 60,
+          status: 'active',
+          isDealer: false,
+          isCurrentActor: false,
+        },
+      ],
+    });
+    const outputs = processStateEvent(view2, ctx);
+
+    const events = eventMessages(outputs);
+    assert.ok(
+      events.some((e) => e.includes('Alice') && e.includes('60')),
+      'should have EVENT for Alice raise',
+    );
+
+    const yourTurn = findOutput(outputs, 'YOUR_TURN');
+    assert.ok(yourTurn, 'should also have YOUR_TURN');
   });
 });

@@ -106,9 +106,11 @@ Note: The lobby waits until enough players join to start a table. If the respons
 
 ## Game Loop
 
-The game loop uses the `poker-listener.js` script. This script connects to the game's SSE stream, watches for state changes, and outputs a single JSON line when you need to act. Then it exits.
+The game loop uses the `poker-listener.js` script as a **background process**. The script connects to the game's SSE stream and outputs each event as a separate JSON line on stdout as it happens. It stays alive for the entire game.
 
-Run the listener:
+### Start the Listener
+
+Start the listener as a background process:
 
 ```bash
 node <SKILL_DIR>/poker-listener.js <BACKEND_URL> <API_KEY> <TABLE_ID>
@@ -116,45 +118,58 @@ node <SKILL_DIR>/poker-listener.js <BACKEND_URL> <API_KEY> <TABLE_ID>
 
 Replace `<SKILL_DIR>` with the directory where this skill's files are located.
 
-The script outputs one JSON line and exits. Parse the JSON and handle it based on the `type` field:
+The script runs continuously and outputs JSON lines. Poll its output periodically to process events.
 
-### YOUR_TURN
+### Polling Loop
+
+Enter a loop that polls the listener output every ~5 seconds:
+
+1. **Poll** the background process for new output lines.
+2. **Process** each JSON line based on its `type` field (see below).
+3. **Check** for user messages and respond if any.
+4. **Wait** ~5 seconds if no events, then loop back to step 1.
+
+### Event Types
+
+#### EVENT
+
+A game event to relay to the user. Print the `message` field exactly as-is. Do not add commentary.
+
+```json
+{"type":"EVENT","message":"Hand #3 — Your cards: A♠ K♥"}
+```
+
+Output to user: `Hand #3 — Your cards: A♠ K♥`
+
+#### YOUR_TURN
 
 You need to make a betting decision.
 
-The output looks like:
-
 ```json
-{
-  "type": "YOUR_TURN",
-  "events": ["Hand #3 — Your cards: A♠ K♥", "Player2 raised to 6"],
-  "state": { ... }
-}
+{"type":"YOUR_TURN","state":{...}}
 ```
 
 **Steps:**
 
-1. Forward each string in `events` to the user as a message. These describe what happened since you last acted (new hand dealt, opponent actions, community cards, etc.).
-
-2. Look at `state` to make your decision. Key fields:
-   - `state.yourCards` — your hole cards (e.g. `["As","Kh"]`)
-   - `state.boardCards` — community cards on the table
+1. Look at `state` to make your decision. Key fields:
+   - `state.yourCards` — your hole cards
+   - `state.boardCards` — community cards
    - `state.yourChips` — your current stack
    - `state.pot` — total pot size
    - `state.phase` — current phase: `PREFLOP`, `FLOP`, `TURN`, or `RIVER`
-   - `state.availableActions` — what you can do right now
-   - `state.players` — all players at the table with their chips, bets, and status
+   - `state.availableActions` — legal moves
+   - `state.players` — all players with chips, bets, and status
 
-3. Look at `state.availableActions` to see what moves are legal. Each action has a `type` and optionally `amount`, `minAmount`, `maxAmount`:
+2. Look at `state.availableActions` for legal moves:
    - `{"type":"fold"}` — give up the hand
    - `{"type":"check"}` — pass (no bet to match)
-   - `{"type":"call","amount":10}` — match the current bet (amount shown)
-   - `{"type":"bet","minAmount":4,"maxAmount":200}` — open betting (choose amount in range)
-   - `{"type":"raise","minAmount":12,"maxAmount":200}` — raise (choose amount in range)
+   - `{"type":"call","amount":10}` — match the current bet
+   - `{"type":"bet","minAmount":4,"maxAmount":200}` — open betting
+   - `{"type":"raise","minAmount":12,"maxAmount":200}` — raise
 
-4. Decide your action using the Decision Making guidelines below.
+3. Decide your action using the Decision Making guidelines below.
 
-5. Submit your action:
+4. Submit your action:
 
 ```bash
 curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
@@ -163,95 +178,66 @@ curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
   -d '{"action":"<ACTION_TYPE>","amount":<AMOUNT>}'
 ```
 
-For `fold`, `check`, `call`, and `all_in`, omit the `amount` field:
+For `fold`, `check`, `call`, and `all_in`, omit the `amount` field. For `bet` and `raise`, include the amount (must be between minAmount and maxAmount).
 
-```bash
-curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
-  -H "x-api-key: <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"call"}'
-```
+5. Tell the user what you did and why in **1 sentence**. Examples:
+   - "Raising to 24 — top pair, good kicker."
+   - "Folding. 7-2 offsuit from early position."
+   - "Calling — open-ended straight draw with pot odds."
 
-For `bet` and `raise`, include the amount (must be between minAmount and maxAmount):
+6. Continue the polling loop.
 
-```bash
-curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/action \
-  -H "x-api-key: <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"raise","amount":24}'
-```
-
-6. Tell the user what you did and why in 1-3 sentences. Be conversational.
-
-7. Run the listener again to wait for the next event.
-
-### HAND_RESULT
+#### HAND_RESULT
 
 A hand just finished and you still have chips.
 
 ```json
-{
-  "type": "HAND_RESULT",
-  "events": ["River: 9♦ | Pot: 48", "Player2 checked"],
-  "state": { ... }
-}
+{"type":"HAND_RESULT","state":{...}}
 ```
 
 **Steps:**
 
-1. Forward each string in `events` to the user.
-2. Check `state.lastHandResult` for winners and pot distribution. Summarize: who won, how much, and what hand they had (if shown).
-3. Report your updated stack from `state.yourChips`.
-4. Run the listener again to continue to the next hand.
+1. Check `state.lastHandResult` for winners and pot distribution.
+2. Summarize in **1 sentence**: who won, how much, your stack. Example: "Lost 20 to Alice's flush. Stack: 480."
+3. Continue the polling loop.
 
-### REBUY_AVAILABLE
+#### REBUY_AVAILABLE
 
 You went bust but can buy back in.
 
 ```json
-{
-  "type": "REBUY_AVAILABLE",
-  "events": [...],
-  "state": { ... }
-}
+{"type":"REBUY_AVAILABLE","state":{...}}
 ```
 
 **Steps:**
 
-1. Forward events to the user.
-2. Tell the user you are out of chips. Mention `state.rebuyAmount` (the cost to buy back in).
-3. If the user wants to continue (or has not said otherwise), re-buy:
+1. Tell the user you are out of chips. Mention `state.rebuyAmount`.
+2. If the user wants to continue (or has not said otherwise), re-buy:
 
 ```bash
 curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/rebuy \
   -H "x-api-key: <API_KEY>"
 ```
 
-4. Tell the user you bought back in and report your new stack.
-5. Run the listener again.
+3. Report your new stack. Continue the polling loop.
 
 If the user says not to re-buy, leave the table instead (see Handling Player Messages).
 
-### WAITING_FOR_PLAYERS
+#### WAITING_FOR_PLAYERS
 
 All opponents have left the table.
 
 **Steps:**
 
-1. Forward any events to the user.
-2. Tell the user all opponents have left and you are alone at the table.
-3. Ask if they want to wait for new players or leave.
-4. If the user says to leave, follow the Leave Requests flow.
-5. If the user says to wait, run the listener again after a moment.
-6. Do NOT loop automatically — wait for the user to respond before running the listener again.
+1. Tell the user all opponents have left and you are alone at the table.
+2. Ask if they want to wait for new players or leave.
+3. If the user says to leave, follow the Leave Requests flow.
+4. If the user says to wait, continue the polling loop.
+5. Do NOT loop automatically — wait for the user to respond.
 
-### TABLE_CLOSED
+#### TABLE_CLOSED
 
-The table has been closed by the server.
-
-```json
-{"type":"TABLE_CLOSED"}
-```
+The table has been closed by the server. The listener process will exit.
 
 **Steps:**
 
@@ -264,24 +250,21 @@ curl -s -X GET <BACKEND_URL>/api/chips/balance \
 ```
 
 3. Report the session summary: final balance, net profit/loss compared to the buy-in.
-4. Stop the game loop. Ask the user if they want to join another game.
+4. Stop the polling loop. Ask the user if they want to join another game.
 
-### CONNECTION_ERROR
+#### CONNECTION_ERROR
 
-Something went wrong with the SSE connection.
+The listener process exited with a connection error.
 
 ```json
-{
-  "type": "CONNECTION_ERROR",
-  "error": "SSE connection error: unknown"
-}
+{"type":"CONNECTION_ERROR","error":"SSE connection error: unknown"}
 ```
 
 **Steps:**
 
-1. Do not immediately alarm the user. Retry by running the listener again.
+1. Do not immediately alarm the user. Restart the listener as a background process.
 2. If you get 3 consecutive CONNECTION_ERRORs, tell the user there is a connection problem and stop.
-3. If a retry succeeds, continue normally and reset the error counter.
+3. On a successful reconnect, reset the error counter and continue.
 
 ## Decision Making
 
@@ -351,38 +334,36 @@ Always respect `minAmount` and `maxAmount` from `availableActions`. If your desi
 
 ## Narration
 
-Communicate naturally with the user as you play. Here is how to handle each type of message:
+Keep messages short. The listener outputs pre-formatted event strings — relay them exactly.
 
-### Game Events
+### Game Events (EVENT type)
 
-Forward the `events` array strings from the listener output directly to the user. These are pre-formatted descriptions like:
+Print the `message` field verbatim. Do not add commentary. Examples:
 
-- "Hand #5 — Your cards: J♠ T♠"
-- "Flop: Q♥ 9♠ 3♦ | Pot: 12"
-- "Player2 raised to 20"
+- `Hand #5 — Your cards: J♠ T♠`
+- `Flop: Q♥ 9♠ 3♦ | Pot: 12`
+- `Player2 raised to 20`
 
-Send these as-is. They give the user a play-by-play of the action.
+### Your Decisions (YOUR_TURN type)
 
-### Your Decisions
+After submitting an action, explain in **1 sentence**. Examples:
 
-After submitting an action, explain your reasoning in 1-3 conversational sentences. Examples:
+- "Raising to 12 — ace-king suited in position."
+- "Folding. 7-2 offsuit, not worth it."
+- "Calling — straight draw with pot odds."
 
-- "I'll raise to 12 here. We have ace-king suited in position and the pot is small — time to build it."
-- "Folding this one. Seven-two offsuit is not worth playing, even from the button."
-- "I'll call. We have an open-ended straight draw and the pot odds are there."
+### Hand Summaries (HAND_RESULT type)
 
-### Hand Summaries
+Summarize in **1 sentence**. Examples:
 
-After each hand result, give a brief summary:
-
-- "Player2 took it down with a pair of queens. We lost 12 chips. Stack: 188."
-- "We won a 45-chip pot with trip jacks! Stack is now 245."
+- "Player2 took it down with queens. Stack: 188."
+- "Won 45 with trip jacks. Stack: 245."
 
 ### Session Updates
 
-Periodically (every 5-10 hands or when asked), give a session summary:
+Only when the user asks or every ~10 hands:
 
-- "After 8 hands we are up 35 chips. Stack: 235. Playing solid so far."
+- "After 8 hands, up 35. Stack: 235."
 
 ## Handling Player Messages
 

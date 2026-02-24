@@ -273,7 +273,74 @@ describe('processStateEvent — buffer flushing', () => {
   });
 });
 
-// ─── 8. processClosedEvent returns TABLE_CLOSED ─────────────────────
+// ─── 8. Returns WAITING_FOR_PLAYERS when alone at table ─────────────
+
+describe('processStateEvent — WAITING_FOR_PLAYERS', () => {
+  it('returns WAITING_FOR_PLAYERS when phase is WAITING and only 1 player', () => {
+    const ctx = makeContext();
+    const view = makeView({
+      phase: 'WAITING',
+      isYourTurn: false,
+      players: [
+        {
+          seat: 0,
+          name: 'Hero',
+          chips: 555,
+          bet: 0,
+          invested: 0,
+          status: 'active',
+          isDealer: true,
+          isCurrentActor: false,
+        },
+      ],
+    });
+
+    const result = processStateEvent(view, ctx);
+
+    assert.notEqual(result, null);
+    assert.equal(result.type, 'WAITING_FOR_PLAYERS');
+    assert.ok(Array.isArray(result.events));
+    assert.equal(result.state, view);
+  });
+
+  it('does NOT return WAITING_FOR_PLAYERS when WAITING with 2 players (one busted)', () => {
+    const ctx = makeContext();
+    const view = makeView({
+      phase: 'WAITING',
+      isYourTurn: false,
+      yourChips: 555,
+      players: [
+        {
+          seat: 0,
+          name: 'Hero',
+          chips: 555,
+          bet: 0,
+          invested: 0,
+          status: 'active',
+          isDealer: true,
+          isCurrentActor: false,
+        },
+        {
+          seat: 1,
+          name: 'Opponent',
+          chips: 0,
+          bet: 0,
+          invested: 0,
+          status: 'active',
+          isDealer: false,
+          isCurrentActor: false,
+        },
+      ],
+    });
+
+    const result = processStateEvent(view, ctx);
+
+    // Should return null (buffering) — opponent can still rebuy
+    assert.equal(result, null);
+  });
+});
+
+// ─── 9. processClosedEvent returns TABLE_CLOSED ─────────────────────
 
 describe('processClosedEvent', () => {
   it('returns TABLE_CLOSED', () => {

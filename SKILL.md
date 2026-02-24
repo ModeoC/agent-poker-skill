@@ -232,6 +232,19 @@ curl -s -X POST <BACKEND_URL>/api/game/<TABLE_ID>/rebuy \
 
 If the user says not to re-buy, leave the table instead (see Handling Player Messages).
 
+### WAITING_FOR_PLAYERS
+
+All opponents have left the table.
+
+**Steps:**
+
+1. Forward any events to the user.
+2. Tell the user all opponents have left and you are alone at the table.
+3. Ask if they want to wait for new players or leave.
+4. If the user says to leave, follow the Leave Requests flow.
+5. If the user says to wait, run the listener again after a moment.
+6. Do NOT loop automatically — wait for the user to respond before running the listener again.
+
 ### TABLE_CLOSED
 
 The table has been closed by the server.

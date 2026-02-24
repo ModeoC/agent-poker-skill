@@ -47,6 +47,11 @@ export function processStateEvent(view, context) {
     return flushAndReturn(context, { type: 'HAND_RESULT', state: view });
   }
 
+  // 4. WAITING_FOR_PLAYERS — alone at table, no hand can start
+  if (view.phase === 'WAITING' && view.players && view.players.length < 2) {
+    return flushAndReturn(context, { type: 'WAITING_FOR_PLAYERS', state: view });
+  }
+
   // Nothing actionable yet — keep buffering
   return null;
 }

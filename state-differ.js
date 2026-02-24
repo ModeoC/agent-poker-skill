@@ -13,9 +13,10 @@ export function diffStates(prev, next) {
 
   // ── 1. New hand (prev is null/undefined, or handNumber changed) ──
   if (!prev || prev.handNumber !== next.handNumber) {
-    const cards = formatCards(next.yourCards);
-    events.push(`Hand #${next.handNumber} — Your cards: ${cards}`);
-    // Don't diff further on new hand — everything is new
+    if (next.yourCards && next.yourCards.length > 0) {
+      const cards = formatCards(next.yourCards);
+      events.push(`Hand #${next.handNumber} — Your cards: ${cards}`);
+    }
     return events;
   }
 

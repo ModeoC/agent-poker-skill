@@ -495,6 +495,19 @@ describe('diffStates — edge cases', () => {
     assert.deepStrictEqual(events, ['Hand #1 — Your cards: A\u2663 K\u2663']);
   });
 
+  it('returns empty array when prev is null and yourCards is empty (WAITING phase reconnect)', () => {
+    const next = makeView({ handNumber: 1, yourCards: [], phase: 'WAITING' });
+    const events = diffStates(null, next);
+    assert.deepStrictEqual(events, []);
+  });
+
+  it('returns empty array when prev is null and yourCards is undefined', () => {
+    const next = makeView({ handNumber: 1, phase: 'WAITING' });
+    delete next.yourCards;
+    const events = diffStates(null, next);
+    assert.deepStrictEqual(events, []);
+  });
+
   it('all-in takes priority over bet/raise/call reporting', () => {
     // If status changed to all_in AND bet changed, report all-in not bet
     const prev = makeView();

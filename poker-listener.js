@@ -1,24 +1,27 @@
 import { diffStates } from './state-differ.js';
 
-// Phases where the hand is actively in progress (cards being dealt / bets being made)
 const ACTIVE_PHASES = new Set(['PREFLOP', 'FLOP', 'TURN', 'RIVER']);
 
 /**
  * Process a state SSE event (PlayerView).
  *
- * Diffs the incoming view against context.prevState, appends events to the
- * buffer, then checks whether the agent needs to act. If so, returns a
- * result object and flushes the buffer. Otherwise returns null.
+ * Diffs the incoming view against context.prevState, returns an array of
+ * output objects — one per diff event (type: EVENT) plus an optional
+ * action object (YOUR_TURN, HAND_RESULT, etc.).
  *
  * @param {object} view       - The latest PlayerView from the SSE stream
  * @param {object} context    - Mutable context:
- *   { prevState: object|null, prevPhase: string|null, eventBuffer: string[] }
- * @returns {object|null}     - Action descriptor or null
+ *   { prevState: object|null, prevPhase: string|null }
+ * @returns {object[]}        - Array of output objects to write to stdout
  */
 export function processStateEvent(view, context) {
-  // Diff against previous state and append new events to the buffer
+  const outputs = [];
+
+  // Diff against previous state — each diff becomes an EVENT line
   const newEvents = diffStates(context.prevState, view);
-  context.eventBuffer.push(...newEvents);
+  for (const message of newEvents) {
+    outputs.push({ type: 'EVENT', message });
+  }
 
   // Capture previous phase before updating
   const prevPhase = context.prevPhase;
@@ -27,11 +30,18 @@ export function processStateEvent(view, context) {
   context.prevState = view;
   context.prevPhase = view.phase;
 
+  // Reset dedup tracker on phase change (new phase = new actionable state)
+  if (view.phase !== prevPhase) {
+    context.lastActionType = null;
+  }
+
   // ── Check whether the agent needs to act ──
 
-  // 1. YOUR_TURN — agent must decide an action
+  // 1. YOUR_TURN — agent must decide an action (always emit, never dedup)
   if (view.isYourTurn) {
-    return flushAndReturn(context, { type: 'YOUR_TURN', state: view });
+    outputs.push({ type: 'YOUR_TURN', state: view });
+    context.lastActionType = 'YOUR_TURN';
+    return outputs;
   }
 
   // 2. Hand ended — phase moved from active to SHOWDOWN or WAITING
@@ -40,40 +50,35 @@ export function processStateEvent(view, context) {
     (view.phase === 'SHOWDOWN' || view.phase === 'WAITING');
 
   if (handJustEnded) {
-    // 3. REBUY_AVAILABLE takes priority over HAND_RESULT when busted
     if (view.yourChips === 0 && view.canRebuy) {
-      return flushAndReturn(context, { type: 'REBUY_AVAILABLE', state: view });
+      outputs.push({ type: 'REBUY_AVAILABLE', state: view });
+      context.lastActionType = 'REBUY_AVAILABLE';
+    } else {
+      outputs.push({ type: 'HAND_RESULT', state: view });
+      context.lastActionType = 'HAND_RESULT';
     }
-    return flushAndReturn(context, { type: 'HAND_RESULT', state: view });
+    return outputs;
   }
 
-  // 4. WAITING_FOR_PLAYERS — alone at table, no hand can start
+  // 3. WAITING_FOR_PLAYERS — alone at table, no hand can start
   if (view.phase === 'WAITING' && view.players && view.players.length < 2) {
-    return flushAndReturn(context, { type: 'WAITING_FOR_PLAYERS', state: view });
+    if (context.lastActionType !== 'WAITING_FOR_PLAYERS') {
+      outputs.push({ type: 'WAITING_FOR_PLAYERS', state: view });
+      context.lastActionType = 'WAITING_FOR_PLAYERS';
+    }
+    return outputs;
   }
 
-  // Nothing actionable yet — keep buffering
-  return null;
+  return outputs;
 }
 
 /**
  * Process a closed SSE event (table closed by the server).
  *
- * @returns {{ type: 'TABLE_CLOSED' }}
+ * @returns {object[]} - Array with single TABLE_CLOSED object
  */
 export function processClosedEvent() {
-  return { type: 'TABLE_CLOSED' };
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-/**
- * Flush the event buffer into a result object and clear it.
- */
-function flushAndReturn(context, result) {
-  result.events = [...context.eventBuffer];
-  context.eventBuffer.length = 0;
-  return result;
+  return [{ type: 'TABLE_CLOSED' }];
 }
 
 // ── Main SSE connection (only when executed directly) ────────────────
@@ -82,11 +87,7 @@ async function main() {
   const [, , backendUrl, token, gameId] = process.argv;
 
   if (!backendUrl || !token || !gameId) {
-    const msg = JSON.stringify({
-      type: 'CONNECTION_ERROR',
-      error: 'Usage: node poker-listener.js <backendUrl> <token> <gameId>',
-    });
-    process.stdout.write(msg + '\n');
+    emit({ type: 'CONNECTION_ERROR', error: 'Usage: node poker-listener.js <backendUrl> <token> <gameId>' });
     process.exit(1);
   }
 
@@ -97,53 +98,45 @@ async function main() {
     const mod = await import('eventsource');
     EventSourceClass = mod.default || mod.EventSource;
   } catch {
-    const msg = JSON.stringify({
-      type: 'CONNECTION_ERROR',
-      error: 'eventsource package not available',
-    });
-    process.stdout.write(msg + '\n');
+    emit({ type: 'CONNECTION_ERROR', error: 'eventsource package not available' });
     process.exit(1);
   }
 
-  const context = { prevState: null, prevPhase: null, eventBuffer: [] };
+  const context = { prevState: null, prevPhase: null, lastActionType: null };
   const es = new EventSourceClass(sseUrl);
 
   es.addEventListener('state', (event) => {
     try {
       const view = JSON.parse(event.data);
-      const result = processStateEvent(view, context);
-      if (result) {
-        process.stdout.write(JSON.stringify(result) + '\n');
-        es.close();
-        process.exit(0);
+      const outputs = processStateEvent(view, context);
+      for (const output of outputs) {
+        emit(output);
       }
     } catch (err) {
-      const msg = JSON.stringify({
-        type: 'CONNECTION_ERROR',
-        error: `Failed to process state event: ${err.message}`,
-      });
-      process.stdout.write(msg + '\n');
+      emit({ type: 'CONNECTION_ERROR', error: `Failed to process state event: ${err.message}` });
       es.close();
       process.exit(1);
     }
   });
 
   es.addEventListener('closed', () => {
-    const result = processClosedEvent();
-    process.stdout.write(JSON.stringify(result) + '\n');
+    const outputs = processClosedEvent();
+    for (const output of outputs) {
+      emit(output);
+    }
     es.close();
     process.exit(0);
   });
 
   es.onerror = (err) => {
-    const msg = JSON.stringify({
-      type: 'CONNECTION_ERROR',
-      error: `SSE connection error: ${err.message || 'unknown'}`,
-    });
-    process.stdout.write(msg + '\n');
-    es.close();
-    process.exit(1);
+    // Emit error but do NOT close/exit — let eventsource auto-reconnect.
+    // The consumer tracks consecutive errors and decides when to give up.
+    emit({ type: 'CONNECTION_ERROR', error: `SSE connection error: ${err.message || 'unknown'}` });
   };
+}
+
+function emit(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
 // Only run main() when the script is executed directly (not imported for tests)

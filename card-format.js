@@ -1,4 +1,4 @@
-const SUIT_MAP = { s: '\u2660', h: '\u2665', d: '\u2666', c: '\u2663' };
+const SUIT_MAP = { s: '♠', h: '♥', d: '♦', c: '♣' };
 
 export function formatCard(card) {
   if (card.length !== 2) return card;

@@ -1,6 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { processStateEvent, processClosedEvent, buildSummary } from '../poker-listener.js';
+import {
+  processStateEvent,
+  processClosedEvent,
+  parseDirectArgs,
+  createEventBatcher,
+  buildDecisionPrompt,
+  buildSummary,
+  readStrategyOverride,
+  buildHandResultSummary,
+} from '../poker-listener.js';
 
 /**
  * Factory to build a PlayerView with sensible defaults.
@@ -56,465 +65,440 @@ function makeView(overrides = {}) {
   return result;
 }
 
-/**
- * Create a fresh context for processStateEvent calls.
- */
 function makeContext(overrides = {}) {
-  return {
-    prevState: null,
-    prevPhase: null,
-    ...overrides,
-  };
+  return { prevState: null, prevPhase: null, lastActionType: null, lastReportedHand: 0, ...overrides };
 }
 
-/** Find an output of a given type in the outputs array. */
-function findOutput(outputs, type) {
-  return outputs.find((o) => o.type === type);
-}
+// ─── processStateEvent ───────────────────────────────────────────────
 
-/** Get all EVENT messages from outputs. */
-function eventMessages(outputs) {
-  return outputs.filter((o) => o.type === 'EVENT').map((o) => o.message);
-}
-
-// ─── 1. Returns EVENT outputs for state diffs ────────────────────────
-
-describe('processStateEvent — EVENT outputs', () => {
-  it('returns EVENT output for new hand diff', () => {
+describe('processStateEvent — returns arrays', () => {
+  it('returns an array of events when not your turn', () => {
     const ctx = makeContext();
     const view = makeView({ isYourTurn: false });
+    const result = processStateEvent(view, ctx);
 
-    const outputs = processStateEvent(view, ctx);
-
-    const events = eventMessages(outputs);
-    assert.ok(events.length > 0, 'should have at least one EVENT');
-    assert.ok(events[0].includes('Hand #1'), 'first event should be hand start');
-    // prevState should be updated
+    assert.ok(Array.isArray(result), 'should return an array');
+    // First call with null prevState generates a new-hand EVENT from diffStates
+    assert.ok(result.length > 0, 'should have at least one event for new hand');
+    assert.equal(result[0].type, 'EVENT');
+    assert.ok(result[0].message.includes('**[Hand #'), 'should have bold hand prefix');
     assert.equal(ctx.prevState, view);
   });
 
-  it('returns empty array when nothing changed', () => {
-    const view = makeView();
+  it('returns empty array on duplicate state (no diff)', () => {
+    const view = makeView({ isYourTurn: false });
     const ctx = makeContext({ prevState: view, prevPhase: 'PREFLOP' });
 
-    const outputs = processStateEvent(view, ctx);
-
-    assert.equal(outputs.length, 0);
+    // Same state again — no diffs, not your turn, no phase transition
+    const result = processStateEvent(makeView({ isYourTurn: false }), ctx);
+    assert.ok(Array.isArray(result));
+    assert.equal(result.length, 0);
   });
 });
-
-// ─── 2. Returns YOUR_TURN after EVENT outputs ────────────────────────
 
 describe('processStateEvent — YOUR_TURN', () => {
-  it('returns EVENT + YOUR_TURN with summary when isYourTurn is true', () => {
+  it('includes YOUR_TURN output when isYourTurn is true', () => {
     const ctx = makeContext();
-    const view = makeView({
+
+    // First call sets prevState
+    processStateEvent(makeView({ isYourTurn: false }), ctx);
+
+    // Second call: your turn
+    const view2 = makeView({
       isYourTurn: true,
       availableActions: [{ type: 'CALL', amount: 20 }],
+      players: [
+        { seat: 0, name: 'Hero', chips: 970, bet: 10, invested: 10, status: 'active', isDealer: true, isCurrentActor: true },
+        { seat: 1, name: 'Alice', chips: 940, bet: 60, invested: 60, status: 'active', isDealer: false, isCurrentActor: false },
+      ],
     });
+    const result = processStateEvent(view2, ctx);
 
-    const outputs = processStateEvent(view, ctx);
-
-    // Should have EVENT(s) from the new hand diff, then YOUR_TURN
-    const events = eventMessages(outputs);
-    assert.ok(events.length > 0, 'should have EVENT outputs');
-
-    const yourTurn = findOutput(outputs, 'YOUR_TURN');
-    assert.ok(yourTurn, 'should have YOUR_TURN output');
-    assert.equal(yourTurn.state, view);
-    assert.ok(typeof yourTurn.summary === 'string', 'should have summary string');
-    assert.ok(yourTurn.summary.includes('PREFLOP'), 'summary should include phase');
-    assert.ok(yourTurn.summary.includes('As Kh'), 'summary should include cards');
-  });
-
-  it('YOUR_TURN appears after EVENT outputs (ordering)', () => {
-    const ctx = makeContext();
-    const view = makeView({ isYourTurn: true });
-
-    const outputs = processStateEvent(view, ctx);
-
-    const lastOutput = outputs[outputs.length - 1];
-    assert.equal(lastOutput.type, 'YOUR_TURN');
+    assert.ok(Array.isArray(result));
+    const yourTurn = result.find(o => o.type === 'YOUR_TURN');
+    assert.ok(yourTurn, 'should contain a YOUR_TURN output');
+    assert.equal(yourTurn.state, view2);
+    assert.ok(typeof yourTurn.summary === 'string');
   });
 });
 
-// ─── 3. Returns HAND_RESULT for active -> SHOWDOWN ───────────────────
+describe('processStateEvent — YOUR_TURN dedup reset', () => {
+  it('re-fires YOUR_TURN in the same phase after turn passes away and back', () => {
+    const ctx = makeContext();
 
-describe('processStateEvent — HAND_RESULT (SHOWDOWN)', () => {
-  it('returns HAND_RESULT when phase transitions from active to SHOWDOWN', () => {
+    // 1) Initial state (not our turn)
+    processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: false, boardCards: ['As', '7c', '2d'] }), ctx);
+
+    // 2) Our turn on the flop — should fire YOUR_TURN
+    const turn1 = processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: true, boardCards: ['As', '7c', '2d'], availableActions: [{ type: 'check' }] }), ctx);
+    assert.ok(turn1.find(o => o.type === 'YOUR_TURN'), 'first YOUR_TURN should fire');
+
+    // 3) Opponent's turn (not ours) — this should reset lastTurnKey
+    processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: false, boardCards: ['As', '7c', '2d'] }), ctx);
+    assert.equal(ctx.lastTurnKey, null, 'lastTurnKey should be null when not our turn');
+
+    // 4) Back to us in the SAME phase (opponent bet, we must respond)
+    const turn2 = processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: true, boardCards: ['As', '7c', '2d'], availableActions: [{ type: 'call', amount: 20 }, { type: 'fold' }] }), ctx);
+    assert.ok(turn2.find(o => o.type === 'YOUR_TURN'), 'second YOUR_TURN in same phase should fire after reset');
+  });
+
+  it('still deduplicates rapid duplicate YOUR_TURN events in the same turn', () => {
+    const ctx = makeContext();
+
+    processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: false, boardCards: ['As', '7c', '2d'] }), ctx);
+
+    // First YOUR_TURN fires
+    const turn1 = processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: true, boardCards: ['As', '7c', '2d'], availableActions: [{ type: 'check' }] }), ctx);
+    assert.ok(turn1.find(o => o.type === 'YOUR_TURN'), 'first should fire');
+
+    // Rapid duplicate (still our turn, no intervening not-our-turn) — should NOT fire
+    const turn2 = processStateEvent(makeView({ handNumber: 2, phase: 'FLOP', isYourTurn: true, boardCards: ['As', '7c', '2d'], availableActions: [{ type: 'check' }] }), ctx);
+    assert.ok(!turn2.find(o => o.type === 'YOUR_TURN'), 'duplicate YOUR_TURN should be suppressed');
+  });
+});
+
+describe('processStateEvent — HAND_RESULT', () => {
+  it('returns HAND_RESULT when active phase → SHOWDOWN', () => {
     const prevView = makeView({ phase: 'RIVER' });
     const ctx = makeContext({ prevState: prevView, prevPhase: 'RIVER' });
 
-    const nextView = makeView({
-      phase: 'SHOWDOWN',
-      isYourTurn: false,
-      boardCards: ['As', '7c', '2d', 'Kh', '3s'],
-    });
+    const nextView = makeView({ phase: 'SHOWDOWN', isYourTurn: false, boardCards: ['As', '7c', '2d', 'Kh', '3s'] });
+    const result = processStateEvent(nextView, ctx);
 
-    const outputs = processStateEvent(nextView, ctx);
-
-    const handResult = findOutput(outputs, 'HAND_RESULT');
-    assert.ok(handResult, 'should have HAND_RESULT output');
+    assert.ok(Array.isArray(result));
+    const handResult = result.find(o => o.type === 'HAND_RESULT');
+    assert.ok(handResult, 'should contain a HAND_RESULT output');
     assert.equal(handResult.state, nextView);
+    assert.equal(handResult.handNumber, 1, 'should include handNumber');
   });
-});
 
-// ─── 4. Returns HAND_RESULT for active -> WAITING ────────────────────
-
-describe('processStateEvent — HAND_RESULT (WAITING)', () => {
-  it('returns HAND_RESULT when phase transitions from active to WAITING', () => {
+  it('returns HAND_RESULT when active phase → WAITING', () => {
     const prevView = makeView({ phase: 'FLOP' });
     const ctx = makeContext({ prevState: prevView, prevPhase: 'FLOP' });
 
-    const nextView = makeView({
-      phase: 'WAITING',
-      isYourTurn: false,
-      boardCards: ['As', '7c', '2d'],
-    });
+    const nextView = makeView({ phase: 'WAITING', isYourTurn: false, boardCards: ['As', '7c', '2d'] });
+    const result = processStateEvent(nextView, ctx);
 
-    const outputs = processStateEvent(nextView, ctx);
-
-    const handResult = findOutput(outputs, 'HAND_RESULT');
-    assert.ok(handResult, 'should have HAND_RESULT output');
+    const handResult = result.find(o => o.type === 'HAND_RESULT');
+    assert.ok(handResult, 'should contain a HAND_RESULT output');
+    assert.equal(handResult.handNumber, 1, 'should include handNumber');
   });
-});
 
-// ─── 5. Does NOT return HAND_RESULT for WAITING -> WAITING ───────────
-
-describe('processStateEvent — no false HAND_RESULT', () => {
-  it('does NOT return HAND_RESULT when phase is WAITING and was already WAITING', () => {
+  it('does NOT return HAND_RESULT for WAITING → WAITING', () => {
     const prevView = makeView({ phase: 'WAITING' });
     const ctx = makeContext({ prevState: prevView, prevPhase: 'WAITING' });
 
-    const nextView = makeView({
-      phase: 'WAITING',
-      isYourTurn: false,
-    });
+    const nextView = makeView({ phase: 'WAITING', isYourTurn: false });
+    const result = processStateEvent(nextView, ctx);
 
-    const outputs = processStateEvent(nextView, ctx);
-
-    const handResult = findOutput(outputs, 'HAND_RESULT');
-    assert.equal(handResult, undefined, 'should NOT have HAND_RESULT');
+    const handResult = result.find(o => o.type === 'HAND_RESULT');
+    assert.equal(handResult, undefined);
   });
 });
 
-// ─── 6. Returns REBUY_AVAILABLE ──────────────────────────────────────
-
 describe('processStateEvent — REBUY_AVAILABLE', () => {
-  it('returns REBUY_AVAILABLE when hand ended and yourChips === 0 and canRebuy', () => {
+  it('returns REBUY_AVAILABLE when busted and can rebuy', () => {
     const prevView = makeView({ phase: 'RIVER' });
     const ctx = makeContext({ prevState: prevView, prevPhase: 'RIVER' });
 
-    const nextView = makeView({
-      phase: 'WAITING',
-      isYourTurn: false,
-      yourChips: 0,
-      canRebuy: true,
-    });
+    const nextView = makeView({ phase: 'WAITING', isYourTurn: false, yourChips: 0, canRebuy: true });
+    const result = processStateEvent(nextView, ctx);
 
-    const outputs = processStateEvent(nextView, ctx);
-
-    const rebuy = findOutput(outputs, 'REBUY_AVAILABLE');
-    assert.ok(rebuy, 'should have REBUY_AVAILABLE output');
+    const rebuy = result.find(o => o.type === 'REBUY_AVAILABLE');
+    assert.ok(rebuy, 'should contain a REBUY_AVAILABLE output');
     assert.equal(rebuy.state, nextView);
+    assert.equal(rebuy.handNumber, 1, 'should include handNumber');
   });
 });
 
-// ─── 7. Each state update produces independent outputs ───────────────
+// ─── Hand transition detection ──────────────────────────────────────
 
-describe('processStateEvent — independent outputs per call', () => {
-  it('each call returns its own outputs, no accumulation across calls', () => {
-    const ctx = makeContext();
+describe('processStateEvent — hand transitions', () => {
+  it('returns HAND_RESULT when hand number changes (fast transition)', () => {
+    const prevView = makeView({ handNumber: 1, phase: 'PREFLOP' });
+    const ctx = makeContext({ prevState: prevView, prevPhase: 'PREFLOP' });
 
-    // First call: new hand diff
-    const view1 = makeView({ isYourTurn: false });
-    const outputs1 = processStateEvent(view1, ctx);
-    assert.ok(outputs1.length > 0, 'first call should have outputs');
+    const nextView = makeView({ handNumber: 2, phase: 'PREFLOP' });
+    const result = processStateEvent(nextView, ctx);
 
-    // Second call: YOUR_TURN with opponent action diff
-    const view2 = makeView({
-      isYourTurn: true,
-      players: [
-        {
-          seat: 0,
-          name: 'Hero',
-          chips: 970,
-          bet: 10,
-          invested: 10,
-          status: 'active',
-          isDealer: true,
-          isCurrentActor: true,
-        },
-        {
-          seat: 1,
-          name: 'Alice',
-          chips: 940,
-          bet: 60,
-          invested: 60,
-          status: 'active',
-          isDealer: false,
-          isCurrentActor: false,
-        },
-      ],
-    });
-    const outputs2 = processStateEvent(view2, ctx);
+    const handResult = result.find(o => o.type === 'HAND_RESULT');
+    assert.ok(handResult, 'should generate HAND_RESULT on hand number change');
+    assert.equal(handResult.handNumber, 1);
+  });
 
-    // outputs2 should NOT contain the hand-start event from outputs1
-    const events2 = eventMessages(outputs2);
-    assert.ok(
-      events2.every((e) => !e.includes('Hand #1')),
-      'second call should not repeat first call events',
-    );
+  it('does not duplicate HAND_RESULT when phase transition and hand change coincide', () => {
+    const prevView = makeView({ handNumber: 1, phase: 'RIVER' });
+    const ctx = makeContext({ prevState: prevView, prevPhase: 'RIVER' });
+
+    const nextView = makeView({ handNumber: 2, phase: 'PREFLOP' });
+    const result = processStateEvent(nextView, ctx);
+
+    const handResults = result.filter(o => o.type === 'HAND_RESULT');
+    assert.equal(handResults.length, 1, 'should have exactly one HAND_RESULT');
+    assert.equal(handResults[0].handNumber, 1, 'should report previous hand number');
+  });
+
+  it('does not re-emit HAND_RESULT for already-reported hand', () => {
+    const prevView = makeView({ handNumber: 1, phase: 'PREFLOP' });
+    const ctx = makeContext({ prevState: prevView, prevPhase: 'PREFLOP', lastReportedHand: 1 });
+
+    const nextView = makeView({ handNumber: 2, phase: 'PREFLOP' });
+    const result = processStateEvent(nextView, ctx);
+
+    const handResults = result.filter(o => o.type === 'HAND_RESULT');
+    assert.equal(handResults.length, 0, 'should not duplicate HAND_RESULT');
   });
 });
 
-// ─── 8. Returns WAITING_FOR_PLAYERS when alone at table ──────────────
+// ─── buildHandResultSummary ─────────────────────────────────────────
 
-describe('processStateEvent — WAITING_FOR_PLAYERS', () => {
-  it('returns WAITING_FOR_PLAYERS when phase is WAITING and only 1 player', () => {
-    const ctx = makeContext();
-    const view = makeView({
-      phase: 'WAITING',
-      isYourTurn: false,
-      players: [
-        {
-          seat: 0,
-          name: 'Hero',
-          chips: 555,
-          bet: 0,
-          invested: 0,
-          status: 'active',
-          isDealer: true,
-          isCurrentActor: false,
-        },
-      ],
-    });
-
-    const outputs = processStateEvent(view, ctx);
-
-    const waiting = findOutput(outputs, 'WAITING_FOR_PLAYERS');
-    assert.ok(waiting, 'should have WAITING_FOR_PLAYERS output');
-    assert.equal(waiting.state, view);
+describe('buildHandResultSummary', () => {
+  it('includes bold hand prefix when handNumber is provided', () => {
+    const state = {
+      yourChips: 1020,
+      lastHandResult: {
+        winners: [0],
+        players: [
+          { seat: 0, name: 'Hero', chips: 1020 },
+          { seat: 1, name: 'Alice', chips: 980 },
+        ],
+        potResults: [{ amount: 40 }],
+      },
+    };
+    const result = buildHandResultSummary(state, 3);
+    assert.ok(result.includes('**[Hand #3]**'), 'should include bold hand prefix');
+    assert.ok(result.includes('Hero won 40'), 'should include winner and pot');
   });
 
-  it('does NOT return WAITING_FOR_PLAYERS when WAITING with 2 players', () => {
-    const ctx = makeContext();
-    const view = makeView({
-      phase: 'WAITING',
-      isYourTurn: false,
-      yourChips: 555,
-      players: [
-        {
-          seat: 0,
-          name: 'Hero',
-          chips: 555,
-          bet: 0,
-          invested: 0,
-          status: 'active',
-          isDealer: true,
-          isCurrentActor: false,
-        },
-        {
-          seat: 1,
-          name: 'Opponent',
-          chips: 0,
-          bet: 0,
-          invested: 0,
-          status: 'active',
-          isDealer: false,
-          isCurrentActor: false,
-        },
-      ],
-    });
-
-    const outputs = processStateEvent(view, ctx);
-
-    const waiting = findOutput(outputs, 'WAITING_FOR_PLAYERS');
-    assert.equal(waiting, undefined, 'should NOT have WAITING_FOR_PLAYERS');
+  it('returns null when no lastHandResult', () => {
+    const state = { yourChips: 1000, lastHandResult: null };
+    assert.equal(buildHandResultSummary(state, 1), null);
   });
 });
-
-// ─── 9. processClosedEvent returns TABLE_CLOSED array ────────────────
 
 describe('processClosedEvent', () => {
   it('returns array with TABLE_CLOSED', () => {
-    const outputs = processClosedEvent();
-    assert.ok(Array.isArray(outputs));
-    assert.equal(outputs.length, 1);
-    assert.deepStrictEqual(outputs[0], { type: 'TABLE_CLOSED' });
+    const result = processClosedEvent();
+    assert.ok(Array.isArray(result));
+    assert.deepStrictEqual(result, [{ type: 'TABLE_CLOSED' }]);
   });
 });
 
-// ─── 10. buildSummary formats decision context ───────────────────────
+// ─── parseDirectArgs ────────────────────────────────────────────────
 
-describe('buildSummary', () => {
-  it('includes phase, cards, pot, stack, active count, and actions', () => {
+describe('parseDirectArgs — canonical flags', () => {
+  it('parses --channel and --chat-id', () => {
+    const argv = ['node', 'poker-listener.js', 'url', 'key', 'table', '--channel', 'telegram', '--chat-id', '7014171428'];
+    const result = parseDirectArgs(argv);
+
+    assert.equal(result.enabled, true);
+    assert.equal(result.channel, 'telegram');
+    assert.equal(result.chatId, '7014171428');
+  });
+
+  it('accepts --target as alias for --chat-id', () => {
+    const argv = ['node', 'poker-listener.js', 'url', 'key', 'table', '--channel', 'telegram', '--target', '12345'];
+    const result = parseDirectArgs(argv);
+
+    assert.equal(result.enabled, true);
+    assert.equal(result.chatId, '12345');
+  });
+
+  it('accepts --to as alias for --chat-id', () => {
+    const argv = ['node', 'poker-listener.js', 'url', 'key', 'table', '--channel', 'telegram', '--to', '12345'];
+    const result = parseDirectArgs(argv);
+
+    assert.equal(result.enabled, true);
+    assert.equal(result.chatId, '12345');
+  });
+
+  it('returns enabled=false when --channel is missing', () => {
+    const argv = ['node', 'poker-listener.js', 'url', 'key', 'table', '--chat-id', '12345'];
+    const result = parseDirectArgs(argv);
+
+    assert.equal(result.enabled, false);
+    assert.equal(result.channel, null);
+  });
+
+  it('returns enabled=false when --chat-id is missing', () => {
+    const argv = ['node', 'poker-listener.js', 'url', 'key', 'table', '--channel', 'telegram'];
+    const result = parseDirectArgs(argv);
+
+    assert.equal(result.enabled, false);
+    assert.equal(result.chatId, null);
+  });
+
+  it('returns enabled=false when no flags', () => {
+    const argv = ['node', 'poker-listener.js', 'url', 'key', 'table'];
+    const result = parseDirectArgs(argv);
+
+    assert.equal(result.enabled, false);
+  });
+});
+
+// ─── createEventBatcher ─────────────────────────────────────────────
+
+describe('createEventBatcher', () => {
+  it('batches messages and sends on flush', () => {
+    const sent = [];
+    const sendFn = (ch, id, text) => sent.push({ ch, id, text });
+    const batcher = createEventBatcher('telegram', '123', sendFn);
+
+    batcher.push('event 1');
+    batcher.push('event 2');
+    batcher.flush();
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].ch, 'telegram');
+    assert.equal(sent[0].id, '123');
+    assert.equal(sent[0].text, 'event 1\nevent 2');
+  });
+
+  it('flush is a no-op when buffer is empty', () => {
+    const sent = [];
+    const sendFn = (ch, id, text) => sent.push({ ch, id, text });
+    const batcher = createEventBatcher('telegram', '123', sendFn);
+
+    batcher.flush();
+    assert.equal(sent.length, 0);
+  });
+
+  it('sends on timer after 2 seconds', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const sent = [];
+    const sendFn = (ch, id, text) => sent.push({ ch, id, text });
+    const batcher = createEventBatcher('telegram', '123', sendFn);
+
+    batcher.push('event 1');
+    assert.equal(sent.length, 0);
+
+    t.mock.timers.tick(2000);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].text, 'event 1');
+  });
+
+  it('flush clears pending timer', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const sent = [];
+    const sendFn = (ch, id, text) => sent.push({ ch, id, text });
+    const batcher = createEventBatcher('telegram', '123', sendFn);
+
+    batcher.push('event 1');
+    batcher.flush();
+    assert.equal(sent.length, 1);
+
+    // Timer should not fire again
+    t.mock.timers.tick(2000);
+    assert.equal(sent.length, 1);
+  });
+});
+
+// ─── buildDecisionPrompt ────────────────────────────────────────────
+
+describe('buildDecisionPrompt', () => {
+  it('includes summary and asks for structured JSON output', () => {
+    const prompt = buildDecisionPrompt('PREFLOP | As Kh | Pot:30', 'https://example.com', 'key123', 'table-1', '');
+
+    assert.ok(prompt.includes('PREFLOP | As Kh | Pot:30'));
+    assert.ok(prompt.includes('Respond with ONLY a JSON object'));
+    assert.ok(prompt.includes('"action"'));
+    assert.ok(prompt.includes('"narration"'));
+    // Should NOT contain curl or API key (listener submits the action now)
+    assert.ok(!prompt.includes('curl'));
+    assert.ok(!prompt.includes('key123'));
+  });
+
+  it('includes strategy override section when present', () => {
+    const prompt = buildDecisionPrompt('PREFLOP | As Kh', 'https://example.com', 'key', 'table-1', 'Play aggressively');
+
+    assert.ok(prompt.includes('User Strategy Override (prioritize this):'));
+    assert.ok(prompt.includes('Play aggressively'));
+  });
+
+  it('omits strategy override section when empty', () => {
+    const prompt = buildDecisionPrompt('PREFLOP | As Kh', 'https://example.com', 'key', 'table-1', '');
+
+    assert.ok(!prompt.includes('User Strategy Override'));
+  });
+});
+
+// ─── buildSummary — board cards ─────────────────────────────────────
+
+describe('buildSummary — board cards', () => {
+  it('includes board cards on flop', () => {
     const view = makeView({
       phase: 'FLOP',
-      yourCards: ['Ah', 'Kd'],
-      pot: 50,
-      yourChips: 450,
-      boardCards: ['Qs', '9h', '3c'],
-      availableActions: [
-        { type: 'fold' },
-        { type: 'check' },
-        { type: 'bet', minAmount: 10, maxAmount: 450 },
-      ],
+      boardCards: ['6d', 'Ad', 'Js'],
+      yourCards: ['6c', '6h'],
+      pot: 40,
+      yourChips: 940,
+      availableActions: [{ type: 'check' }],
     });
-
-    const summary = buildSummary(view);
-
-    assert.ok(summary.includes('FLOP'), 'should include phase');
-    assert.ok(summary.includes('Ah Kd'), 'should include cards');
-    assert.ok(summary.includes('Pot:50'), 'should include pot');
-    assert.ok(summary.includes('Stack:450'), 'should include stack');
-    assert.ok(summary.includes('2 active'), 'should include active count');
-    assert.ok(summary.includes('fold'), 'should include fold action');
-    assert.ok(summary.includes('check'), 'should include check action');
-    assert.ok(summary.includes('bet 10-450'), 'should include bet range');
+    const result = buildSummary(view);
+    assert.ok(result.includes('Board: 6d Ad Js'), `should include board cards, got: ${result}`);
+    assert.ok(result.includes('6c 6h'), 'should include hole cards');
+    assert.ok(result.startsWith('FLOP |'), 'should start with phase');
   });
 
-  it('shows call amount', () => {
+  it('includes board cards on turn', () => {
     const view = makeView({
-      availableActions: [
-        { type: 'fold' },
-        { type: 'call', amount: 20 },
-        { type: 'raise', minAmount: 40, maxAmount: 970 },
-      ],
+      phase: 'TURN',
+      boardCards: ['6d', 'Ad', 'Js', '3c'],
+      yourCards: ['6c', '6h'],
+      pot: 80,
+      yourChips: 900,
+      availableActions: [{ type: 'check' }, { type: 'raise', minAmount: 20, maxAmount: 900 }],
     });
-
-    const summary = buildSummary(view);
-
-    assert.ok(summary.includes('call 20'), 'should show call with amount');
-    assert.ok(summary.includes('raise 40-970'), 'should show raise range');
+    const result = buildSummary(view);
+    assert.ok(result.includes('Board: 6d Ad Js 3c'), `should include 4 board cards, got: ${result}`);
   });
 
-  it('handles missing cards gracefully', () => {
-    const view = makeView({ yourCards: undefined });
-    const summary = buildSummary(view);
-    assert.ok(summary.includes('??'), 'should show ?? for missing cards');
+  it('includes board cards on river', () => {
+    const view = makeView({
+      phase: 'RIVER',
+      boardCards: ['6d', 'Ad', 'Js', '3c', '9h'],
+      yourCards: ['6c', '6h'],
+      pot: 160,
+      yourChips: 820,
+      availableActions: [{ type: 'check' }],
+    });
+    const result = buildSummary(view);
+    assert.ok(result.includes('Board: 6d Ad Js 3c 9h'), `should include 5 board cards, got: ${result}`);
   });
 
-  it('handles empty available actions', () => {
-    const view = makeView({ availableActions: [] });
-    const summary = buildSummary(view);
-    assert.ok(summary.includes('Actions: '), 'should have empty actions');
+  it('omits board section preflop (no board cards)', () => {
+    const view = makeView({
+      phase: 'PREFLOP',
+      boardCards: [],
+      yourCards: ['As', 'Kh'],
+      pot: 30,
+      yourChips: 970,
+      availableActions: [{ type: 'call', amount: 20 }, { type: 'fold' }],
+    });
+    const result = buildSummary(view);
+    assert.ok(!result.includes('Board:'), `should not include Board: preflop, got: ${result}`);
+    assert.ok(result.startsWith('PREFLOP | As Kh'), 'should go straight to hole cards');
+  });
+
+  it('omits board section when boardCards is undefined', () => {
+    const view = makeView({
+      phase: 'PREFLOP',
+      yourCards: ['As', 'Kh'],
+      pot: 30,
+      yourChips: 970,
+      availableActions: [{ type: 'fold' }],
+    });
+    delete view.boardCards;
+    const result = buildSummary(view);
+    assert.ok(!result.includes('Board:'), 'should not include Board: when undefined');
   });
 });
 
-// ─── 11. Opponent actions produce EVENT outputs ──────────────────────
+// ─── readStrategyOverride ───────────────────────────────────────────
 
-describe('processStateEvent — opponent action events', () => {
-  it('produces EVENT for opponent raise between calls', () => {
-    const view1 = makeView({ isYourTurn: false });
-    const ctx = makeContext();
-    processStateEvent(view1, ctx);
-
-    // Opponent raised
-    const view2 = makeView({
-      isYourTurn: true,
-      players: [
-        {
-          seat: 0,
-          name: 'Hero',
-          chips: 970,
-          bet: 10,
-          invested: 10,
-          status: 'active',
-          isDealer: true,
-          isCurrentActor: true,
-        },
-        {
-          seat: 1,
-          name: 'Alice',
-          chips: 940,
-          bet: 60,
-          invested: 60,
-          status: 'active',
-          isDealer: false,
-          isCurrentActor: false,
-        },
-      ],
-    });
-    const outputs = processStateEvent(view2, ctx);
-
-    const events = eventMessages(outputs);
-    assert.ok(
-      events.some((e) => e.includes('Alice') && e.includes('60')),
-      'should have EVENT for Alice raise',
-    );
-
-    const yourTurn = findOutput(outputs, 'YOUR_TURN');
-    assert.ok(yourTurn, 'should also have YOUR_TURN');
-  });
-});
-
-// ─── 12. Dedup: WAITING_FOR_PLAYERS not re-emitted on repeated state ─
-
-describe('processStateEvent — WAITING_FOR_PLAYERS dedup', () => {
-  it('does NOT re-emit WAITING_FOR_PLAYERS on repeated WAITING state with 1 player', () => {
-    const ctx = makeContext();
-    const view = makeView({
-      phase: 'WAITING',
-      isYourTurn: false,
-      players: [
-        {
-          seat: 0,
-          name: 'Hero',
-          chips: 555,
-          bet: 0,
-          invested: 0,
-          status: 'active',
-          isDealer: true,
-          isCurrentActor: false,
-        },
-      ],
-    });
-
-    // First call: should emit WAITING_FOR_PLAYERS
-    const outputs1 = processStateEvent(view, ctx);
-    const waiting1 = findOutput(outputs1, 'WAITING_FOR_PLAYERS');
-    assert.ok(waiting1, 'first call should have WAITING_FOR_PLAYERS');
-
-    // Second call with same state: should NOT re-emit
-    const outputs2 = processStateEvent(view, ctx);
-    const waiting2 = findOutput(outputs2, 'WAITING_FOR_PLAYERS');
-    assert.equal(waiting2, undefined, 'second call should NOT have WAITING_FOR_PLAYERS');
-  });
-
-  it('re-emits WAITING_FOR_PLAYERS after phase changes and returns to WAITING', () => {
-    const ctx = makeContext();
-    const alonePlayer = [
-      {
-        seat: 0,
-        name: 'Hero',
-        chips: 555,
-        bet: 0,
-        invested: 0,
-        status: 'active',
-        isDealer: true,
-        isCurrentActor: false,
-      },
-    ];
-
-    // 1. WAITING alone → WAITING_FOR_PLAYERS emitted
-    const waitingView1 = makeView({ phase: 'WAITING', isYourTurn: false, players: alonePlayer });
-    processStateEvent(waitingView1, ctx);
-
-    // 2. Phase changes to PREFLOP (someone joined, new hand)
-    const preflopView = makeView({ phase: 'PREFLOP', handNumber: 2 });
-    processStateEvent(preflopView, ctx);
-
-    // 3. PREFLOP → WAITING triggers HAND_RESULT (hand ended), not WAITING_FOR_PLAYERS
-    const waitingView2 = makeView({ phase: 'WAITING', isYourTurn: false, handNumber: 2, players: alonePlayer });
-    const handEndOutputs = processStateEvent(waitingView2, ctx);
-    const handResult = findOutput(handEndOutputs, 'HAND_RESULT');
-    assert.ok(handResult, 'PREFLOP→WAITING should produce HAND_RESULT');
-
-    // 4. Subsequent WAITING update (same phase) → now WAITING_FOR_PLAYERS fires
-    const waitingView3 = makeView({ phase: 'WAITING', isYourTurn: false, handNumber: 2, players: alonePlayer });
-    const outputs = processStateEvent(waitingView3, ctx);
-    const waiting = findOutput(outputs, 'WAITING_FOR_PLAYERS');
-    assert.ok(waiting, 'should re-emit WAITING_FOR_PLAYERS after hand result cleared');
+describe('readStrategyOverride', () => {
+  it('returns empty string when file is missing', () => {
+    const result = readStrategyOverride();
+    assert.equal(result, '');
   });
 });

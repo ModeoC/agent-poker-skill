@@ -10,12 +10,15 @@ import { formatCard, formatCards } from './card-format.js';
  */
 export function diffStates(prev, next) {
   const events = [];
+  const hdr = `**[Hand #${next.handNumber}]**`;
 
   // ── 1. New hand (prev is null/undefined, or handNumber changed) ──
   if (!prev || prev.handNumber !== next.handNumber) {
     if (next.yourCards && next.yourCards.length > 0) {
       const cards = formatCards(next.yourCards);
-      events.push(`Hand #${next.handNumber} — Your cards: ${cards}`);
+      const me = next.players?.find(p => p.seat === next.yourSeat);
+      const stack = me?.chips ?? next.yourChips;
+      events.push(`${hdr} Your cards: ${cards} · Stack: ${stack}`);
     }
     return events;
   }
@@ -32,19 +35,20 @@ export function diffStates(prev, next) {
 
     // 10. All-in (status changed to all_in) — takes priority over bet/raise/call
     if (prevPlayer.status !== 'all_in' && nextPlayer.status === 'all_in') {
-      events.push(`${nextPlayer.name} went all-in (${nextPlayer.bet})`);
+      events.push(`${hdr} ${nextPlayer.name} went all-in (${nextPlayer.invested} invested · ${nextPlayer.chips} behind)`);
       continue;
     }
 
     // 5. Folded (status changed to folded)
     if (prevPlayer.status !== 'folded' && nextPlayer.status === 'folded') {
-      events.push(`${nextPlayer.name} folded`);
+      events.push(`${hdr} ${nextPlayer.name} folded`);
       continue;
     }
 
     // Bet changed — classify as bet, raise, or call
     if (nextPlayer.bet > prevPlayer.bet) {
       const betAmount = nextPlayer.bet;
+      const chipInfo = ` (${nextPlayer.invested} invested · ${nextPlayer.chips} behind)`;
 
       // Find the highest bet among all players in the PREVIOUS state
       const prevMaxBet = Math.max(...prev.players.map((p) => p.bet));
@@ -53,19 +57,19 @@ export function diffStates(prev, next) {
         // No prior bet existed, or this player was already at max — it's a new bet
         // But if others had a bet and this player raised above it, it's a raise
         if (prevMaxBet > 0 && betAmount > prevMaxBet) {
-          events.push(`${nextPlayer.name} raised to ${betAmount}`);
+          events.push(`${hdr} ${nextPlayer.name} raised to ${betAmount}${chipInfo}`);
         } else if (prevMaxBet === 0) {
-          events.push(`${nextPlayer.name} bet ${betAmount}`);
+          events.push(`${hdr} ${nextPlayer.name} bet ${betAmount}${chipInfo}`);
         } else {
           // Was at max and stayed at max — this is a call (shouldn't normally happen)
-          events.push(`${nextPlayer.name} called ${betAmount}`);
+          events.push(`${hdr} ${nextPlayer.name} called ${betAmount}${chipInfo}`);
         }
       } else if (betAmount > prevMaxBet) {
         // Raised above the previous max
-        events.push(`${nextPlayer.name} raised to ${betAmount}`);
+        events.push(`${hdr} ${nextPlayer.name} raised to ${betAmount}${chipInfo}`);
       } else {
         // Matched the existing bet — call
-        events.push(`${nextPlayer.name} called ${betAmount}`);
+        events.push(`${hdr} ${nextPlayer.name} called ${betAmount}${chipInfo}`);
       }
       continue;
     }
@@ -77,7 +81,7 @@ export function diffStates(prev, next) {
       nextPlayer.bet === prevPlayer.bet &&
       nextPlayer.status === 'active'
     ) {
-      events.push(`${nextPlayer.name} checked`);
+      events.push(`${hdr} ${nextPlayer.name} checked`);
       continue;
     }
   }
@@ -89,7 +93,7 @@ export function diffStates(prev, next) {
   // 2. Flop dealt (0 -> 3)
   if (prevBoardLen === 0 && nextBoardLen >= 3) {
     const flopCards = formatCards(next.boardCards.slice(0, 3));
-    events.push(`Flop: ${flopCards} | Pot: ${next.pot}`);
+    events.push(`${hdr} Flop: ${flopCards} | Pot: ${next.pot}`);
   }
 
   // 3. Turn dealt (3 -> 4)
@@ -97,7 +101,8 @@ export function diffStates(prev, next) {
     // Only report if we hadn't already reported it as part of flop
     if (prevBoardLen === 3) {
       const turnCard = formatCard(next.boardCards[3]);
-      events.push(`Turn: ${turnCard} | Pot: ${next.pot}`);
+      const board = formatCards(next.boardCards.slice(0, 4));
+      events.push(`${hdr} Turn: ${turnCard} → ${board} | Pot: ${next.pot}`);
     }
   }
 
@@ -105,7 +110,8 @@ export function diffStates(prev, next) {
   if (prevBoardLen <= 4 && nextBoardLen >= 5 && prevBoardLen < nextBoardLen) {
     if (prevBoardLen === 4) {
       const riverCard = formatCard(next.boardCards[4]);
-      events.push(`River: ${riverCard} | Pot: ${next.pot}`);
+      const board = formatCards(next.boardCards);
+      events.push(`${hdr} River: ${riverCard} → ${board} | Pot: ${next.pot}`);
     }
   }
 

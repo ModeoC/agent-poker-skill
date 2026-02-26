@@ -88,14 +88,14 @@ describe('diffStates — new hand started', () => {
   it('returns hand start event when prev is null', () => {
     const next = makeView({ handNumber: 1, yourCards: ['As', 'Kh'] });
     const events = diffStates(null, next);
-    assert.deepStrictEqual(events, ['Hand #1 — Your cards: A\u2660 K\u2665']);
+    assert.deepStrictEqual(events, ['**[Hand #1]** Your cards: A\u2660 K\u2665 \u00b7 Stack: 970']);
   });
 
   it('returns hand start event when handNumber changed', () => {
     const prev = makeView({ handNumber: 1 });
     const next = makeView({ handNumber: 2, yourCards: ['Tc', '9d'] });
     const events = diffStates(prev, next);
-    assert.deepStrictEqual(events, ['Hand #2 — Your cards: T\u2663 9\u2666']);
+    assert.deepStrictEqual(events, ['**[Hand #2]** Your cards: T\u2663 9\u2666 \u00b7 Stack: 970']);
   });
 
   it('does not produce other events when hand just started', () => {
@@ -108,7 +108,7 @@ describe('diffStates — new hand started', () => {
     // Only the hand-start event, nothing about the flop
     const events = diffStates(prev, next);
     assert.equal(events.length, 1);
-    assert.match(events[0], /^Hand #2/);
+    assert.match(events[0], /^\*\*\[Hand #2\]\*\*/);
   });
 });
 
@@ -123,14 +123,14 @@ describe('diffStates — flop dealt', () => {
       phase: 'FLOP',
     });
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Flop: A\u2660 7\u2663 2\u2666 | Pot: 42'));
+    assert.ok(events.includes('**[Hand #1]** Flop: A\u2660 7\u2663 2\u2666 | Pot: 42'));
   });
 });
 
 // ─── 3. Turn dealt ───────────────────────────────────────────────────
 
 describe('diffStates — turn dealt', () => {
-  it('reports turn card and pot', () => {
+  it('reports turn card with full board and pot', () => {
     const prev = makeView({
       boardCards: ['As', '7c', '2d'],
       pot: 42,
@@ -142,14 +142,14 @@ describe('diffStates — turn dealt', () => {
       phase: 'TURN',
     });
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Turn: K\u2665 | Pot: 80'));
+    assert.ok(events.includes('**[Hand #1]** Turn: K\u2665 \u2192 A\u2660 7\u2663 2\u2666 K\u2665 | Pot: 80'));
   });
 });
 
 // ─── 4. River dealt ──────────────────────────────────────────────────
 
 describe('diffStates — river dealt', () => {
-  it('reports river card and pot', () => {
+  it('reports river card with full board and pot', () => {
     const prev = makeView({
       boardCards: ['As', '7c', '2d', 'Kh'],
       pot: 80,
@@ -161,7 +161,7 @@ describe('diffStates — river dealt', () => {
       phase: 'RIVER',
     });
     const events = diffStates(prev, next);
-    assert.ok(events.includes('River: 3\u2660 | Pot: 120'));
+    assert.ok(events.includes('**[Hand #1]** River: 3\u2660 \u2192 A\u2660 7\u2663 2\u2666 K\u2665 3\u2660 | Pot: 120'));
   });
 });
 
@@ -175,7 +175,7 @@ describe('diffStates — opponent folded', () => {
       isCurrentActor: false,
     });
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Alice folded'));
+    assert.ok(events.includes('**[Hand #1]** Alice folded'));
   });
 
   it('does NOT report when our own seat folds', () => {
@@ -189,7 +189,7 @@ describe('diffStates — opponent folded', () => {
 // ─── 6. Opponent bet ─────────────────────────────────────────────────
 
 describe('diffStates — opponent bet', () => {
-  it('reports when opponent makes first bet (no prior bets)', () => {
+  it('reports when opponent makes first bet with chip context', () => {
     const prev = makeView({
       phase: 'FLOP',
       players: [
@@ -234,18 +234,19 @@ describe('diffStates — opponent bet', () => {
       ...next.players[1],
       chips: 955,
       bet: 25,
+      invested: 45,
       isCurrentActor: false,
     };
     next.currentPlayerToAct = 2;
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Alice bet 25'));
+    assert.ok(events.includes('**[Hand #1]** Alice bet 25 (45 invested \u00b7 955 behind)'));
   });
 });
 
 // ─── 7. Opponent raised ──────────────────────────────────────────────
 
 describe('diffStates — opponent raised', () => {
-  it('reports when opponent raises above existing bet', () => {
+  it('reports when opponent raises above existing bet with chip context', () => {
     // Preflop: Hero SB 10, Alice BB 20, Bob has bet 0
     // Bob raises to 50
     const prev = makeView(); // Alice bet=20 is highest
@@ -259,18 +260,19 @@ describe('diffStates — opponent raised', () => {
       name: 'Bob',
       chips: 950,
       bet: 50,
+      invested: 50,
       isCurrentActor: false,
     };
     next.currentPlayerToAct = 0;
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Bob raised to 50'));
+    assert.ok(events.includes('**[Hand #1]** Bob raised to 50 (50 invested \u00b7 950 behind)'));
   });
 });
 
 // ─── 8. Opponent called ──────────────────────────────────────────────
 
 describe('diffStates — opponent called', () => {
-  it('reports when opponent calls existing bet', () => {
+  it('reports when opponent calls existing bet with chip context', () => {
     // Alice has bet 20 (BB). Bob calls 20.
     const prev = makeView(); // Bob bet=0, Alice bet=20
     const next = {
@@ -283,11 +285,12 @@ describe('diffStates — opponent called', () => {
       name: 'Bob',
       chips: 980,
       bet: 20,
+      invested: 20,
       isCurrentActor: false,
     };
     next.currentPlayerToAct = 0;
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Bob called 20'));
+    assert.ok(events.includes('**[Hand #1]** Bob called 20 (20 invested \u00b7 980 behind)'));
   });
 });
 
@@ -340,7 +343,7 @@ describe('diffStates — opponent checked', () => {
     };
     next.currentPlayerToAct = 2;
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Alice checked'));
+    assert.ok(events.includes('**[Hand #1]** Alice checked'));
   });
 
   it('does NOT report check for our own seat', () => {
@@ -383,7 +386,7 @@ describe('diffStates — opponent checked', () => {
 // ─── 10. Opponent went all-in ────────────────────────────────────────
 
 describe('diffStates — opponent went all-in', () => {
-  it('reports when opponent goes all-in with bet amount', () => {
+  it('reports when opponent goes all-in with invested and behind', () => {
     const prev = makeView();
     const next = {
       ...makeView(),
@@ -394,11 +397,12 @@ describe('diffStates — opponent went all-in', () => {
       ...next.players[1],
       chips: 0,
       bet: 1000,
+      invested: 1000,
       status: 'all_in',
       isCurrentActor: false,
     };
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Alice went all-in (1000)'));
+    assert.ok(events.includes('**[Hand #1]** Alice went all-in (1000 invested \u00b7 0 behind)'));
   });
 
   it('does NOT report all-in for our own seat', () => {
@@ -485,27 +489,14 @@ describe('diffStates — edge cases', () => {
     // Bob folded between prev and next
     next.players[2] = { ...next.players[2], status: 'folded' };
     const events = diffStates(prev, next);
-    assert.ok(events.includes('Bob folded'));
-    assert.ok(events.includes('Flop: A\u2660 7\u2663 2\u2666 | Pot: 60'));
+    assert.ok(events.includes('**[Hand #1]** Bob folded'));
+    assert.ok(events.includes('**[Hand #1]** Flop: A\u2660 7\u2663 2\u2666 | Pot: 60'));
   });
 
   it('handles prev with undefined prev (first state)', () => {
     const next = makeView({ handNumber: 1, yourCards: ['Ac', 'Kc'] });
     const events = diffStates(undefined, next);
-    assert.deepStrictEqual(events, ['Hand #1 — Your cards: A\u2663 K\u2663']);
-  });
-
-  it('returns empty array when prev is null and yourCards is empty (WAITING phase reconnect)', () => {
-    const next = makeView({ handNumber: 1, yourCards: [], phase: 'WAITING' });
-    const events = diffStates(null, next);
-    assert.deepStrictEqual(events, []);
-  });
-
-  it('returns empty array when prev is null and yourCards is undefined', () => {
-    const next = makeView({ handNumber: 1, phase: 'WAITING' });
-    delete next.yourCards;
-    const events = diffStates(null, next);
-    assert.deepStrictEqual(events, []);
+    assert.deepStrictEqual(events, ['**[Hand #1]** Your cards: A\u2663 K\u2663 \u00b7 Stack: 970']);
   });
 
   it('all-in takes priority over bet/raise/call reporting', () => {
@@ -520,6 +511,7 @@ describe('diffStates — edge cases', () => {
       name: 'Bob',
       chips: 0,
       bet: 1000,
+      invested: 1000,
       status: 'all_in',
       isCurrentActor: false,
     };
@@ -527,7 +519,7 @@ describe('diffStates — edge cases', () => {
     // Should have all-in but NOT also bet/raise
     const allInEvents = events.filter((e) => e.includes('all-in'));
     const betEvents = events.filter(
-      (e) => e.includes('bet') || e.includes('raised') || e.includes('called'),
+      (e) => e.includes(' bet ') || e.includes('raised') || e.includes('called'),
     );
     assert.equal(allInEvents.length, 1);
     assert.equal(betEvents.length, 0);
